@@ -1,0 +1,134 @@
+<meta charset="utf-8">
+<title>Vol Dual</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/3.1.0/plotly.min.js"></script>
+<script>if(!window.Plotly)document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.1.0/plotly.min.js"><\/script>')</script>
+<style>
+:root{--bg:#f4f5f2;--card:#fff;--ink:#1b1f24;--mut:#5f6b76;--line:#e1e4df;--acc:#0f6e5c;--acc2:#d9efe9;--warn:#a35f00;--warn2:#fbefdc;--crit:#b42318;--crit2:#fbe4e1;--chip:#eef0ec;
+  --f:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;--m:"IBM Plex Mono",ui-monospace,Consolas,monospace;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#121416;--card:#1b1f22;--ink:#e6e8ea;--mut:#9aa4ad;--line:#2b3136;--acc:#3fbf9f;--acc2:#183a33;--warn:#e0a03a;--warn2:#3a2c14;--crit:#f2665a;--crit2:#3d1b18;--chip:#252b2f;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#121416;--card:#1b1f22;--ink:#e6e8ea;--mut:#9aa4ad;--line:#2b3136;--acc:#3fbf9f;--acc2:#183a33;--warn:#e0a03a;--warn2:#3a2c14;--crit:#f2665a;--crit2:#3d1b18;--chip:#252b2f;color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--f)}
+.wrap{max-width:1300px;margin:0 auto;padding-inline:16px;padding-block:18px 40px;display:grid;gap:16px}
+header{display:flex;flex-wrap:wrap;gap:6px 20px;justify-content:space-between;align-items:baseline}h1{font-size:21px;margin:0;font-weight:600}
+.sub{color:var(--mut);font-size:12.5px}.theme{font:inherit;font-size:12px;background:none;border:1px solid var(--line);border-radius:6px;color:var(--mut);padding:3px 8px;cursor:pointer}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px}
+.k{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px}.k .r{font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.06em}
+.k .v{font:500 24px/1.2 var(--m);margin-top:4px}.k .x{font-size:12px;color:var(--mut);margin-top:2px}
+.cx{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;min-width:0}
+.cx h2{font-size:13px;margin:0 0 10px;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.g2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}.g2>*{min-width:0}@media(max-width:900px){.g2{grid-template-columns:minmax(0,1fr)}}
+.scroll{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}th{font-size:11.5px;color:var(--mut);font-weight:500;cursor:pointer;user-select:none}
+td.l,th.l{text-align:left}td{font-variant-numeric:tabular-nums;font-family:var(--m);font-size:12.5px}td.l{font-family:var(--f);font-size:13px}
+tr.cl{cursor:pointer}tr.cl:hover td{background:var(--acc2)}.det td{background:var(--bg);white-space:normal;text-align:left;font-family:var(--f)}
+.chip{display:inline-block;font:500 11px/1.6 var(--f);padding:0 7px;border-radius:9px;background:var(--chip);color:var(--mut);white-space:nowrap}
+.f-mer{background:var(--acc2);color:var(--acc)}.f-anb{background:var(--chip);color:var(--ink)}.f-cvm{background:var(--warn2);color:var(--warn)}.f-sem{background:var(--crit2);color:var(--crit)}
+.pos{color:var(--acc)}.neg{color:var(--crit)}.mut{color:var(--mut)}
+.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}input,select{font:inherit;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--ink)}
+.bar{display:flex;height:10px;border-radius:5px;overflow:hidden;margin-top:8px}.bar span{display:block}
+.texto{max-width:80ch}.texto p,.texto li{margin:.35em 0}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px}
+</style>
+<div class="wrap">
+<header><div><h1 id="t"></h1><div class="sub" id="s"></div></div><div><span class="sub" id="hora"></span> <button class="theme" id="tema">tema</button></div></header>
+<div class="kpis" id="kpis"></div>
+<div class="g2"><div class="cx"><h2>Retorno diário da carteira (ANBIMA oficial) × VaR 95% do modelo</h2><div id="g_hist" style="height:300px"></div></div>
+  <div class="cx"><h2>Quem gera a vol do fundo</h2><div id="g_contrib" style="height:300px"></div></div></div>
+<div class="cx" id="cx_curvas"><h2>Curvas do ativo — % do PU par, PU indicativo e taxa indicativa (ANBIMA oficial; pontos = negócios)</h2>
+  <div class="ctl"><select id="sel_ativo" aria-label="ativo" style="max-width:100%"></select><span class="sub" id="sel_info"></span></div>
+  <div id="cv_aviso" class="sub" hidden></div>
+  <div class="g2"><div><b>% do PU par</b><div id="cv_p" style="height:300px"></div></div><div><b>Taxa indicativa</b> <span class="sub">(linha cheia = oficial, pontilhada = calculada do PU oficial)</span><div id="cv_t" style="height:300px"></div></div></div>
+  <div class="g2" style="margin-top:8px"><div><b>PU indicativo (R$)</b><div id="cv_u" style="height:300px"></div></div><div><b>Histórico diário</b><div class="scroll" style="max-height:300px;overflow-y:auto"><table id="cv_tab"></table></div></div></div></div>
+<div class="cx" id="cx_hoje"><h2>Negociado hoje na B3 (ao vivo, ~15 min) — taxa contra a ANBIMA de ontem</h2><div class="scroll"><table id="t_hoje"></table></div></div>
+<div class="cx"><div class="ctl"><span class="sub">clique num ativo para ver as curvas</span> <input id="busca" placeholder="buscar código ou emissor" aria-label="buscar"><select id="f_fonte" aria-label="fonte"><option value="">toda fonte</option><option value="mer">mercado (negócios)</option><option value="anb">ANBIMA</option><option value="cvm">CVM mensal / pares</option><option value="sem">sem dado</option><option value="nao">sem código B3</option></select></div>
+  <div class="scroll"><table id="t_at"></table></div></div>
+<div class="cx texto"><h2>Como ler</h2>
+<p><b>Preço oficial:</b> PU indicativo e PU par da <b>ANBIMA</b>, todo dia, desde o início da marcação de cada papel — o mesmo preço com que os fundos marcam a cota. Vem da página pública de cada ativo na ANBIMA Data (gráfico "Total"). <b>% do PU par</b> = PU indicativo ÷ PU par. A <b>taxa indicativa</b> é a oficial desde 14/09/2026 (arquivo diário guardado); antes disso é calculada do PU oficial, partindo da primeira taxa oficial e voltando no tempo pela duration (conferido: ~1,5 bps num papel normal, ~14 bps num estressado).</p>
+<p><b>Vol</b> = desvio do retorno total diário (PU indicativo + juros/amortização pagos ÷ PU do dia anterior) dos últimos 12 meses × √252 — o mesmo método dos sites de investimento, com o preço oficial. <b>Vol atual</b> = EWMA diária (λ 0,94). Papel sem marcação ANBIMA usa os negócios (SND/B3, retornos semanais com o ruído de negócio corrigido), a CVM ou a mediana dos pares.</p>
+<p><b>Fundo:</b> vols × correlação dos retornos diários oficiais (≥ 60 dias em comum, encolhida 30% para a média <span id="rho"></span>); VaR paramétrico 95%. <b>Teste do VaR:</b> retorno diário da carteira (só papéis com ANBIMA, pesos do Excel) nos últimos 250 dias contra o VaR do modelo — o certo é ~5% de dias acima do VaR.</p>
+<p><b>Negócios</b> (pontos nos gráficos e "negociado hoje") mostram onde o mercado está negociando contra a ANBIMA — o alerta de que a marcação vai mexer. <b>Não entra:</b> linhas sem código B3 e derivativos.</p></div>
+</div>
+<script>
+const D=/*DADOS*/;
+const $=s=>document.querySelector(s),esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const br=(v,c=2)=>v==null||!isFinite(v)?"—":Number(v).toLocaleString("pt-BR",{minimumFractionDigits:c,maximumFractionDigits:c});
+const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+try{const t=localStorage.getItem("tema");if(t)document.documentElement.dataset.theme=t}catch(e){}
+$("#tema").onclick=()=>{const r=document.documentElement,a=r.dataset.theme||(matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"),n=a=="dark"?"light":"dark";r.dataset.theme=n;try{localStorage.setItem("tema",n)}catch(e){};tudo()};
+const C=D.carteira,A=D.ativos,COB=A.filter(a=>a.coberto);
+const fcls=f=>!f?"f-sem":/oficial/.test(f)?"f-mer":/sem mercado|estimado/.test(f)?"f-cvm":/SND|B3/.test(f)?"f-mer":/ANBIMA/.test(f)?"f-anb":"f-sem";
+const fnome=f=>!f?"sem dado":/oficial/.test(f)?"ANBIMA":/estimado/.test(f)?"pares":/sem mercado/.test(f)?"CVM mensal":/SND/.test(f)?"SND":/B3/.test(f)?"B3":/ANBIMA/.test(f)?"ANBIMA":f;
+$("#t").textContent=`Vol do ${D.fundo}`;$("#s").textContent=`Carteira pública CVM (look-through) · ${A.length} linhas, ${COB.length} com código B3 (${br(C.pl_codigo,1)}% do PL)`;$("#hora").textContent="atualizado "+D.gerado;$("#rho").textContent="("+br(C.rho,2)+")";
+const LAY=x=>Object.assign({margin:{l:52,r:12,t:8,b:36},paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{family:css("--f"),size:11,color:css("--ink")},
+  xaxis:{gridcolor:css("--line"),zerolinecolor:css("--line")},yaxis:{gridcolor:css("--line"),zerolinecolor:css("--line")},showlegend:false,hovermode:"closest"},x||{});
+const plot=(id,d,l)=>Plotly.react(id,d,LAY(l),{displayModeBar:false,responsive:true});
+function kpis(){const pf=C.por_fonte||{},ofi=pf.oficial||0,mer=pf.mercado||0,cvm=(pf.CVM||0)+(pf.estimado||0),sem=pf["sem dado"]||0,B=C.backtest||{};
+  const rs=v=>C.pl?"R$ "+br(v/100*C.pl,1)+" mi":"";
+  const ok=B.violacoes!=null&&B.violacoes<=7.5,cls=B.violacoes==null?"":ok?"pos":"neg";
+  const k=[["Vol do fundo",br(C.vol)+"%","a.a., parte coberta ("+br(C.cobertura,1)+"% do PL)"],["VaR 95% 1 dia",br(C.var95_1d,3)+"%",rs(C.var95_1d)+" · do PL"],
+   ["VaR 95% 1 mês",br(C.var95_1m)+"%",rs(C.var95_1m)],["Sem diversificação",br(C.vol_sem_div)+"%","soma ponderada das vols"],
+   ["Duration",br(C.duration)+" anos","+100 bps: "+br(C.choque)+"% do PL"]];
+  $("#kpis").innerHTML=k.map(x=>`<div class="k"><div class="r">${x[0]}</div><div class="v">${x[1]}</div><div class="x">${x[2]}</div></div>`).join("")+
+   `<div class="k"><div class="r">Teste do VaR (${B.dias||0} dias)</div><div class="v ${cls}">${br(B.violacoes,1)}%</div><div class="x">dias com perda acima do VaR 95% (esperado 5%) · vol real ${br(B.vol_real)}% × modelo ${br(B.vol_modelo)}%</div></div>`+
+   `<div class="k"><div class="r">De onde vem o preço (% PL)</div><div class="x" style="margin-top:6px"><span class="chip f-mer">ANBIMA oficial ${br(ofi,1)}</span> <span class="chip f-anb">negócios ${br(mer,1)}</span> <span class="chip f-cvm">CVM/pares ${br(cvm,1)}</span> <span class="chip f-sem">sem ${br(sem,1)}</span></div>
+   <div class="bar"><span style="width:${ofi}%;background:var(--acc)"></span><span style="width:${mer}%;background:var(--mut)"></span><span style="width:${cvm}%;background:var(--warn)"></span><span style="width:${sem}%;background:var(--crit)"></span><span style="flex:1;background:var(--line)"></span></div><div class="x">resto: sem código B3</div></div>`}
+function graf(){const s=D.serie_fundo;
+  plot("g_hist",[{type:"bar",x:s.d,y:s.ret,marker:{color:s.ret.map(v=>v<s.var?css("--crit"):css("--acc"))},name:"retorno",hovertemplate:"%{x}<br>%{y:.3f}% do PL<extra></extra>"},
+    {x:[s.d[0],s.d[s.d.length-1]],y:[s.var,s.var],mode:"lines",line:{color:css("--crit"),width:1.5,dash:"dash"},name:"VaR 95%",hovertemplate:"VaR 95%: %{y:.3f}%<extra></extra>"}],
+    {yaxis:{title:{text:"% do PL no dia"},gridcolor:css("--line")},bargap:0});
+  const t=[...COB].filter(a=>a.contrib_pct!=null).sort((a,b)=>b.contrib_pct-a.contrib_pct).slice(0,12).reverse();
+  plot("g_contrib",[{type:"bar",orientation:"h",y:t.map(a=>a.codigo),x:t.map(a=>a.contrib_pct),marker:{color:t.map(a=>fcls(a.fonte)=="f-mer"?css("--acc"):fcls(a.fonte)=="f-cvm"?css("--warn"):css("--mut"))},
+    customdata:t.map(a=>[a.emissor,a.perc_nav,a.vol,fnome(a.fonte)]),hovertemplate:"%{y} · %{customdata[0]}<br>%{x:.1f}% da vol do fundo<br>%{customdata[1]:.2f}% do PL · vol %{customdata[2]:.1f}% · %{customdata[3]}<extra></extra>"}],
+    {margin:{l:84,r:12,t:8,b:36},xaxis:{title:{text:"% da vol do fundo"},gridcolor:css("--line")}})}
+function hoje(){const H=COB.filter(a=>a.hoje).sort((a,b)=>Math.abs(b.hoje.sd??0)-Math.abs(a.hoje.sd??0));
+  if(!H.length){$("#t_hoje").innerHTML='<tr><td class="l mut">Nenhum ativo da carteira negociou hoje (ainda).</td></tr>';return}
+  $("#t_hoje").innerHTML="<tr><th class='l'>Ativo</th><th>% PL</th><th>Negócios</th><th>Volume (R$ mil)</th><th>Taxa hoje</th><th>Referência</th><th>Δ taxa (bps)</th><th>Efeito no preço</th><th title='variação ÷ (vol diária + ruído do preço de hoje)'>Significância</th></tr>"+
+   H.map(a=>{const h=a.hoje,sd=h.sd;return`<tr><td class="l"><b>${esc(a.codigo)}</b> <span class="mut">${esc((a.emissor||"").slice(0,24))}</span>${h.varejo?' <span class="chip f-cvm">só varejo</span>':""}${h.verificar?' <span class="chip f-sem">verificar: salto de preço</span>':""}</td><td>${br(a.perc_nav)}</td><td>${h.n}</td><td>${br(h.vol/1e3,0)}</td><td>${br(h.taxa)}</td>
+   <td>${h.ref==null?"—":br(h.ref)+" <span class='mut'>"+esc(h.quando)+"</span>"}</td><td class="${(h.bps||0)>0?"neg":"pos"}">${br(h.bps,0)}</td><td class="${(h.var||0)>=0?"pos":"neg"}">${h.var==null?"—":br(h.var)+"%"}</td>
+   <td class="${Math.abs(sd||0)>=2&&!h.varejo?"neg":""}">${sd==null||!isFinite(sd)?"—":br(sd,1)+"σ"}</td></tr>`}).join("")}
+const COLS=[["codigo","Ativo","l"],["emissor","Emissor","l"],["perc_nav","% PL"],["duration","Dur."],["taxa_anbima","Taxa indicativa"],["pct_anbima","% PU par"],["pu_anbima","PU indicativo"],
+  ["ult","Último negócio"],["ret_1m","Retorno 1m"],["fonte","Fonte","l"],["dias_neg_12m","Dias c/ negócio 12m"],["vol","Vol 12m %"],["vol_ewma","Vol atual %"],["contrib_pct","% vol fundo"]];
+const ord={k:"perc_nav",asc:false};
+function tabela(){const b=$("#busca").value.toLowerCase(),ff=$("#f_fonte").value;
+  let L=A.filter(a=>(ff=="nao"?!a.coberto:a.coberto&&(!ff||fcls(a.fonte)=="f-"+ff))&&((a.codigo||"")+" "+(a.emissor||"")+" "+a.entrada).toLowerCase().includes(b));
+  L.sort((x,y)=>{const u=x[ord.k],v=y[ord.k];if(u==null)return 1;if(v==null)return-1;return(u>v?1:u<v?-1:0)*(ord.asc?1:-1)});
+  $("#t_at").innerHTML="<tr>"+COLS.map(c=>`<th class="${c[2]||""}" data-k="${c[0]}" tabindex="0">${c[1]}${ord.k==c[0]?(ord.asc?" ▲":" ▼"):""}</th>`).join("")+"</tr>"+
+   L.slice(0,300).map(a=>`<tr class="cl" data-i="${A.indexOf(a)}">`+COLS.map(c=>{const v=a[c[0]];
+     if(c[0]=="codigo")return a.coberto?`<td class="l"><b>${esc(v)}</b> <span class="mut">${esc(a.venc)}</span></td>`:`<td class="l mut">${esc(a.entrada.slice(0,48))}</td>`;
+     if(c[0]=="emissor")return`<td class="l">${esc((v||"").slice(0,28))}</td>`;
+     if(c[0]=="fonte")return`<td class="l">${a.coberto?`<span class="chip ${fcls(v)}">${esc(fnome(v))}</span>`:""}</td>`;
+     if(c[0]=="ult"){const H=a.hist||{d:[]},i=H.d.length-1-[...(H.u||[])].reverse().findIndex(v=>v!=null);const ok=H.d.length&&i<H.d.length;
+       return`<td>${ok&&H.t[i]!=null?br(H.t[i])+"% ":""}${ok&&H.p[i]!=null?br(H.p[i])+"% par":""}${ok?" <span class='mut'>"+H.d[i].slice(8)+"/"+H.d[i].slice(5,7)+"/"+H.d[i].slice(2,4)+"</span>":"—"}</td>`}
+     if(c[0]=="dias_neg_12m")return`<td>${v??"—"}</td>`;
+     if(c[0]=="pu_anbima")return`<td>${br(v,2)}</td>`;
+     if(c[0]=="taxa_anbima"||c[0]=="pct_anbima")return`<td>${br(v,c[0]=="taxa_anbima"?4:2)}</td>`;
+     return`<td class="${c[0]=="ret_1m"?(v>=0?"pos":"neg"):""}">${br(v,c[0]=="contrib_pct"?1:2)}</td>`}).join("")+"</tr>").join("");
+  $("#t_at").querySelectorAll("th").forEach(h=>h.onclick=()=>{ord.asc=ord.k==h.dataset.k?!ord.asc:false;ord.k=h.dataset.k;tabela()});
+  $("#t_at").querySelectorAll("tr.cl").forEach(t=>t.onclick=()=>detalhe(t,A[+t.dataset.i]))}
+$("#busca").oninput=tabela;$("#f_fonte").oninput=tabela;let nd=0;
+const hojeLocal=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
+const dBR=s=>s?s.split("-").reverse().join("/"):"—";
+function curvas(a){const H=a.hist||{d:[]},N=H.d.length;
+  if(!window.Plotly){$("#cv_aviso").hidden=false;$("#cv_aviso").textContent="A biblioteca de gráficos não carregou nesta rede (cdnjs/jsdelivr bloqueados). A tabela ao lado tem os mesmos dados.";}
+  const ini=H.d.find((d,i)=>H.tc[i]===0),iniP=H.d.find((d,i)=>H.uA[i]!=null);
+  $("#sel_info").textContent=`${a.emissor||""} · ${a.indexador||""} ${br(a.taxa_emissao)} · venc. ${dBR(a.venc)} · duration ${br(a.duration)} · vol 12m ${br(a.vol)}% (${fnome(a.fonte)}) · PU/% par oficiais desde ${dBR(iniP)} · taxa oficial desde ${dBR(ini)}`;
+  const sz=H.v.map(v=>v==null?4:4+Math.sqrt(v)*3),pts=k=>({type:"scatter",mode:"markers",x:H.d,y:H[k],marker:{size:sz,color:css("--acc"),opacity:.55},name:"negociado",hovertemplate:"%{x|%d/%m/%Y}<br>negociado %{y:.2f}<extra></extra>"});
+  const lin=(y,nome,dash,c)=>({type:"scatter",mode:"lines",connectgaps:true,x:H.d,y,line:{color:css("--warn"),width:dash?1.6:2.2,dash:dash?"dot":"solid"},name:nome,hovertemplate:"%{x|%d/%m/%Y}<br>"+nome+" %{y:."+c+"f}<extra></extra>"});
+  const L=t=>({yaxis:{title:{text:t},gridcolor:css("--line")},xaxis:{type:"date",tickformat:"%m/%y",gridcolor:css("--line")},showlegend:true,legend:{orientation:"h",y:1.12,x:0}});
+  const extra=[];if(a.hoje&&a.hoje.taxa!=null)extra.push({type:"scatter",mode:"markers",x:[hojeLocal()],y:[a.hoje.taxa],marker:{size:11,symbol:"diamond",color:css("--crit")},name:"hoje (B3)",hovertemplate:"hoje %{y:.2f}%<extra></extra>"});
+  if(window.Plotly){
+    plot("cv_p",[pts("p"),lin(H.pA,"ANBIMA",false,2)],L("% do PU par"));
+    plot("cv_t",[pts("t"),lin(H.tA.map((v,i)=>H.tc[i]===1?v:null),"calculada",true,2),lin(H.tA.map((v,i)=>H.tc[i]===0?v:null),"ANBIMA oficial",false,4),...extra],L("taxa (% a.a.)"));
+    plot("cv_u",[pts("u"),lin(H.uA,"ANBIMA",false,2)],L("PU (R$)"))}
+  $("#cv_tab").innerHTML="<tr><th class='l'>Data</th><th>% par ANBIMA</th><th>PU ANBIMA</th><th>Taxa ANBIMA</th><th></th><th>Taxa negociada</th><th>% par negociado</th><th>PU negociado</th><th>Vol. R$ mi</th></tr>"+
+    H.d.map((d,i)=>N-1-i).map(i=>`<tr><td class="l">${dBR(H.d[i])}</td><td>${br(H.pA[i])}</td><td>${br(H.uA[i])}</td><td>${br(H.tA[i],4)}</td><td class="mut">${H.tc[i]===1?"calc.":H.tA[i]!=null?"oficial":""}</td><td>${br(H.t[i])}</td><td>${br(H.p[i])}</td><td>${br(H.u[i])}</td><td>${br(H.v[i])}</td></tr>`).join("")}
+function seletor(){const L=COB.filter(a=>a.hist&&a.hist.d.length).sort((x,y)=>y.perc_nav-x.perc_nav);
+  $("#sel_ativo").innerHTML=L.map(a=>`<option value="${A.indexOf(a)}">${esc(a.codigo)} — ${esc((a.emissor||"").slice(0,30))} — ${br(a.perc_nav)}% PL${/oficial/.test(a.fonte||"")?"":" (sem ANBIMA)"}</option>`).join("");
+  $("#sel_ativo").onchange=()=>curvas(A[+$("#sel_ativo").value]);
+  const ini=L.find(a=>/oficial/.test(a.fonte||""))||L[0];if(ini){$("#sel_ativo").value=A.indexOf(ini);curvas(ini)}}
+function detalhe(tr,a){if(!a.coberto)return;$("#sel_ativo").value=A.indexOf(a);curvas(a);$("#cx_curvas").scrollIntoView({behavior:"smooth",block:"start"})}
+function tudo(){kpis();if(window.Plotly)graf();hoje();tabela();seletor()}tudo();
+</script>

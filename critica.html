@@ -1,0 +1,56 @@
+<h3>Em uma frase</h3>
+<p>O esqueleto funciona ponta a ponta (Excel → identificação → vol por três fontes → vol do fundo → notícias, eventos e mercado, atualizando sozinho), mas o número de vol ainda depende de uma calibração grosseira da B3 e só cobre 43% do PL. Use como radar, ainda não como número de risco.</p>
+
+<h3>1. Cálculo da vol (o que mais precisa de trabalho)</h3>
+<ul>
+<li><b>Os negócios da B3 têm muito ruído.</b> Negócios de varejo levam corretagem dentro da taxa: hoje a OZNH11 negociou 217 bps acima da ANBIMA e a AEGE17 207 bps abaixo. Mesmo com a correção de Roll, a vol da B3 sai ~1,7× a da ANBIMA. O POC multiplica a B3 por k = 0,60 (mediana entre os papéis que têm as duas fontes), um ajuste igual para todos. <i>Melhor:</i> medir o ruído de cada papel comparando a taxa de cada negócio com a ANBIMA do dia e tirar essa variância; separar negócios institucionais (volume alto) de varejo.</li>
+<li><b>A ANBIMA indicativa é suave e curta.</b> Ela é uma média de cotações e muda pouco, então tende a subestimar a vol. O site só guarda ~15 dias úteis; o histórico local tem 25 dias e cresce um por dia.</li>
+<li><b>A vol mensal da CVM é suavizada, e zero nos papéis marcados na curva.</b> As debêntures de securitizadoras (Vert, Opea, Liqi) saem com vol perto de zero porque os fundos não marcam a mercado. Isso esconde risco justamente no maior bloco do fundo (Vert 3,1% e Opea 3,0% do PL).</li>
+<li><b>Taxa × duration não serve para papel estressado.</b> Na Braskem (BRKMA8) a conversão explode; o POC usa o menor valor entre isso e a vol do PU, mas o PU também carrega dias de cupom. Para estressados, o certo é a vol do % do PU par.</li>
+<li><b>Duration aproximada fora da ANBIMA</b> (CRI, CRA, debêntures privadas): vem do painel ou do prazo.</li>
+<li><b>Correlação simples:</b> 0,30 para todos quando não há 12 meses em comum. Falta um modelo de fatores: juros (DI1/DAP ao vivo já estão na tela) + spread por setor/rating. Assim o choque de juros e o de spread ficam separados e a vol do fundo deixa de depender de correlações ruidosas.</li>
+<li><b>Vol não é risco de crédito.</b> Default é salto, não vol. Falta uma camada de evento: rating, ação do emissor caindo forte, fato relevante e notícia negativa ao mesmo tempo.</li>
+</ul>
+
+<h3>2. Cobertura</h3>
+<ul>
+<li><b>Só 43% do PL tem código B3</b> neste teste, porque a carteira da CVM não traz código de LF, LFSC, NC, CDB, cotas de FIDC e fundos offshore (a maior posição, 3,4%, é um fundo offshore). Com o seu Excel, que já vem com código, a cobertura sobe. Para esses tipos: LF/LFSC/NC pelo PU negociado na B3 + data de emissão (spread implícito); FIDC pela cota diária da ANBIMA Data; bonds pela TradingView/FINRA (já usados no <code>carteira.py</code>).</li>
+<li><b>A vol do fundo hoje é só da parte coberta</b> (0,39% a.a. sobre 39,6% do PL). Caixa e títulos públicos têm vol ~0, mas o resto não.</li>
+<li><b>Derivativos e hedges</b> não entram.</li>
+</ul>
+
+<h3>3. Notícias e eventos</h3>
+<ul>
+<li><b>Notícia pelo nome do emissor gera ruído:</b> "Vert" traz campeonato de skate; para CRI/CRA busca a securitizadora (Opea, Vert) em vez do devedor. <i>Melhor:</i> buscar pelo devedor (CNPJ → nome pelo cadastro da CVM) e pela ação.</li>
+<li><b>Alertas por palavra-chave</b> pegam "falência" em reportagem genérica sobre o agro. Falta classificar o que é do emissor e o que é setor.</li>
+<li><b>Fatos relevantes (CVM)</b> já são o melhor sinal: hoje mostram waiver de troca de controle na Mills (AGD de 3 emissões), upgrade da Valid pela Moody's e nova emissão da Valid.</li>
+<li><b>Agenda ANBIMA</b>: só lê a 1ª página (20 eventos); em papéis longos os próximos podem estar na 2ª. O Edge headless leva ~2–3 min para 25 papéis (fica em cache no dia).</li>
+<li><b>Falta ligar cada ativo ao que move o emissor:</b> petróleo → PetroReconcavo/Prio, minério → mineradoras, boi → frigoríficos, dólar → quem tem dívida em dólar. Os preços já estão na tela, mas sem o vínculo com cada papel.</li>
+<li><b>Calendário macro</b> (Copom, IPCA, payroll) ainda não entrou.</li>
+</ul>
+
+<h3>4. Rodando ao vivo</h3>
+<ul>
+<li><code>python vol_monitor.py rodar</code> recalcula a cada 15 min no pregão (~25 s por ciclo) e grava uma foto em <code>dados/</code>, mas ainda não desenha a <b>vol do fundo ao longo do tempo</b> a partir dessas fotos.</li>
+<li>Não manda alerta (e-mail/celular); a página precisa ser aberta.</li>
+<li>Yahoo, Google Notícias e as APIs da B3 não são oficiais/documentadas e podem mudar sem aviso.</li>
+<li>A coluna <code>data</code> do Excel ainda não é usada (dá para fazer vol e P&L desde a data de entrada).</li>
+</ul>
+
+<h3>5. O que achei no caminho e talvez você não saiba</h3>
+<ul>
+<li>A taxa de um negócio isolado na B3 pode estar ±200 bps fora do mercado por causa da corretagem do varejo. Por isso o monitor usa média ponderada de negócios ≥ R$ 50 mil.</li>
+<li>A Braskem (BRKMA8) responde por ~9% da vol do fundo com só 0,13% do PL: o papel tem vol de ~50% a.a. e a ação, 77%.</li>
+<li>HAPV3 caiu 8,4% hoje (vol 3m de 107%) e a HAPV18 está a CDI + 9,4%: ação e debênture contam a mesma história. Vale ter um alerta "ação caiu mais de X% e o fundo tem a debênture".</li>
+<li>Os informes de fatos relevantes da CVM incluem emissores que só têm dívida registrada (sem ação na bolsa), e trazem AGD, waiver e avisos de pagamento.</li>
+<li>A curva DI1/DAP da B3 sai de graça com ~15 min de atraso: serve para separar quanto da variação de cada papel foi juros e quanto foi spread.</li>
+</ul>
+
+<h3>Próximos passos que eu sugiro (em ordem)</h3>
+<ol>
+<li>Ruído da B3 por papel (comparação com a ANBIMA do dia) no lugar do k único.</li>
+<li>Modelo de fatores (juros DI/IPCA + spread por setor) para a vol do fundo e o choque.</li>
+<li>Cobertura de LF/NC/FIDC/bonds com as fontes já mapeadas; rodar com o seu Excel real.</li>
+<li>Gráfico da vol do fundo no tempo (as fotos já estão sendo gravadas) e alertas por e-mail/celular.</li>
+<li>Notícias pelo devedor e pela ação; mapa ativo → commodity/câmbio; calendário macro.</li>
+</ol>
