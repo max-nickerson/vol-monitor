@@ -14,6 +14,8 @@ def serie_oficial(h):
     pago = pago.where(~x.evento.fillna("").str.upper().str.contains("INCORPORA") | x.evento.fillna("").str.contains(";"), 0)
     x["pago"] = pago
     v = x[x.pu_ind.notna() & x.pu_par.notna() & (x.pu_par > 0)].copy()
+    casas = v.pu_ind.map(lambda u: next((k for k in range(7) if abs(round(u, k) - u) < 1e-9), 7))
+    v = v[10.0 ** -casas.values / v.pu_ind.values < 5e-4]                  # PU publicado arredondado (ex.: 1,0 num papel de VNE 1): passo > 0,05%
     pct = v.pu_ind / v.pu_par * 100
     med = pct.rolling(11, center=True, min_periods=3).median()
     v = v[(pct - med).abs() <= 8]
