@@ -1877,6 +1877,80 @@ def consolida_fundo(f, A, emis, diarios, idx_c, mkt, td_, fdiario, cdi_aa, ipca_
     return out
 
 
+# ================================================================== negócios do dia ranqueados pela diferença de taxa
+def negocios_dia(A, fundos_pesos):
+    """Negócios B3 de crédito do último pregão com negócio, contra a taxa indicativa ANBIMA do dia útil anterior.
+    Devolve a lista de negócios (ranqueável pela diferença em bps) e, por papel, a curva ANBIMA e os negócios de 30 dias (bolhas)."""
+    an = anbima_diario()
+    dia = HOJE
+    for k in range(6):
+        nh = negocios([dia])
+        nh = nh[(nh.taxa > 0) & (nh.vol >= 10_000)] if len(nh) else nh
+        if len(nh) > 50:
+            break
+        dia = (dia - pd.offsets.BDay(1)).normalize()
+    if not len(nh):
+        return {"dia": None, "negocios": [], "papeis": {}}
+    # referência: ANBIMA do dia útil anterior (arquivo diário; CRI/CRA pela série do monitor)
+    ant = an[an.data < dia]
+    ref = ant[ant.data == ant.data.max()].drop_duplicates("codigo").set_index("codigo") if len(ant) else pd.DataFrame()
+    refA = {}
+    for r in A[A.coberto].itertuples():
+        h = r.hist if isinstance(r.hist, dict) else {}
+        d_, t_ = h.get("d", []), h.get("tA", [])
+        i = max((j for j, d in enumerate(d_) if d < dia.strftime("%Y-%m-%d") and t_[j] is not None), default=None)
+        if i is not None:
+            refA[r.codigo] = (t_[i], d_[i], r.duration, r.idx)
+    snd, cad = snd_caracteristicas(), cadastro_b3().drop_duplicates("cod").set_index("cod")
+    ix = indexadores(list(nh.cod.unique()))
+    linhas = []
+    for r in nh.itertuples():
+        if len(ref) and r.cod in ref.index and pd.notna(ref.taxa_ind.get(r.cod)):
+            tr, dr, du_ = float(ref.taxa_ind[r.cod]), ref.data.iloc[0].strftime("%Y-%m-%d"), float(ref.duration_anos.get(r.cod) or np.nan)
+        elif r.cod in refA:
+            tr, dr, du_, _ = refA[r.cod]
+        else:
+            continue
+        dif = (r.taxa - tr) * 100
+        if abs(dif) > 1500:
+            continue
+        linhas.append({"cod": r.cod, "hora": "" if pd.isna(getattr(r, "hora", None)) else str(r.hora)[:5], "vol": float(r.vol), "taxa": float(r.taxa), "pu": float(r.pu), "ref": tr,
+                       "ref_data": dr, "dif": float(dif), "idx": ix.get(r.cod), "dur": du_ if du_ == du_ else None, "tipo": r.tipo,
+                       "emissor": str(snd.empresa.get(r.cod) if r.cod in snd.index else cad.emissor.get(r.cod, "") or "")[:40]})
+    N = pd.DataFrame(linhas)
+    if not len(N):
+        return {"dia": dia.strftime("%Y-%m-%d"), "negocios": [], "papeis": {}}
+    # por papel no dia: volume e diferença ponderada → movimento esperado da ANBIMA (fração do gap pelo volume do dia, estudo)
+    g = N.assign(dv=N.dif * N.vol).groupby("cod").agg(dv=("dv", "sum"), vol=("vol", "sum"), n=("vol", "size"))
+    g["dif"] = g.dv / g.vol
+    g["frac"], g["acerto"] = zip(*[next((f, h) for lim, f, h in FRACAO_GAP if v < lim) for v in g.vol])
+    g["esperado"] = g.frac * g.dif
+    N = N.join(g[["vol", "dif", "esperado", "acerto", "n"]].rename(columns={"vol": "vol_dia", "dif": "dif_dia", "n": "n_dia"}), on="cod")
+    emis_cod = N.groupby("cod").emissor.first().to_dict()
+    # papéis no ranking: curva ANBIMA (arquivo diário + série do monitor) e negócios de 30 dias, um por bolha
+    cods = list(dict.fromkeys(N.reindex(N.dif.abs().sort_values(ascending=False).index).cod))[:400]
+    h30 = negocios(list(pd.bdate_range(dia - pd.Timedelta(days=45), dia)), set(cods))
+    h30 = h30[(h30.taxa > 0) & (h30.vol >= 10_000)]
+    papeis = {}
+    for c in cods:
+        a = an[an.codigo.eq(c)].dropna(subset=["taxa_ind"]).sort_values("data")
+        curva = {"d": [d.strftime("%Y-%m-%d") for d in a.data], "t": [round(float(v), 4) for v in a.taxa_ind]}
+        if c in A.codigo.values:
+            h = A.loc[A.codigo.eq(c), "hist"].iloc[0]
+            if isinstance(h, dict) and h.get("d"):
+                corte = (dia - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
+                par = [(d, t) for d, t in zip(h["d"], h["tA"]) if d >= corte and t is not None and d not in curva["d"]]
+                curva = {"d": sorted([d for d, _ in par] + curva["d"]), "t": [t for _, t in sorted(par + list(zip(curva["d"], curva["t"])))]}
+        x = h30[h30.cod.eq(c)]
+        papeis[c] = {"emissor": emis_cod.get(c), "curva": curva, "neg": {"d": [d.strftime("%Y-%m-%d") for d in x.data], "h": ["" if pd.isna(v) else str(v)[:5] for v in (x["hora"] if "hora" in x else [None] * len(x))],
+                                             "t": [round(float(v), 4) for v in x.taxa], "v": [round(float(v) / 1e6, 3) for v in x.vol]}}
+    N = N.sort_values("dif", key=lambda v: -v.abs())
+    return {"dia": dia.strftime("%Y-%m-%d"), "ref_data": ref.data.iloc[0].strftime("%Y-%m-%d") if len(ref) else None,
+            "negocios": json.loads(N.drop(columns=["emissor", "pu", "dur", "ref_data", "tipo"]).to_json(orient="records", double_precision=4)), "papeis": papeis,
+            "estudo": [{"faixa": "≥ R$ 20 mi", "frac": 0.39, "acerto": 82}, {"faixa": "R$ 5–20 mi", "frac": 0.30, "acerto": 73},
+                       {"faixa": "R$ 1–5 mi", "frac": 0.07, "acerto": 58}, {"faixa": "< R$ 1 mi", "frac": 0.0, "acerto": 52}]}
+
+
 # ================================================================== página e execução
 CAMPOS_ATIVO = ["codigo", "emissor", "raiz", "idx", "indexador", "cupom", "venc", "tipo", "lastro", "duration", "taxa", "data_taxa", "pct_par", "pu", "vol",
                 "fonte", "dtaxa_1m", "ret_1m", "pnl_car", "pnl_mtm", "pnl_res", "pnl_total", "giro_30d", "neg_30d", "hist", "agenda", "prev_hoje", "prev5", "regras_dias"]
@@ -1958,7 +2032,13 @@ def uma_vez(arq=None):
             q, it = noticias(e["nome"])
             if it:
                 news[r] = {"busca": q, "itens": it}
-    ctx = {"juros": A.attrs.get("juros") or juros_b3(), "focus": fo, "noticias": news, "info5": A.attrs.get("info5"), "data_ref": A.attrs.get("data_ref")}
+    try:
+        neg_dia = negocios_dia(A, {x["nome"]: x["pesos"] for x in F if x.get("pesos")})
+    except Exception as e:
+        log(f"negócios do dia: erro {type(e).__name__} {e}")
+        neg_dia = {"dia": None, "negocios": [], "papeis": {}}
+    log(f"negócios do dia {neg_dia['dia']}: {len(neg_dia['negocios'])} com referência ANBIMA")
+    ctx = {"negocios_dia": neg_dia, "juros": A.attrs.get("juros") or juros_b3(), "focus": fo, "noticias": news, "info5": A.attrs.get("info5"), "data_ref": A.attrs.get("data_ref")}
     h = pagina(F, A, emis, idx_c, mkt, td_, ctx)
     (SAIDA / "vol_monitor.html").write_text(h, encoding="utf-8")
     log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB, {len(F)} fundos ({time.time() - t0:.0f}s)")
@@ -2018,7 +2098,7 @@ tr.cl{cursor:pointer}tr.cl:hover td{background:var(--chip)}
 <div class="top"><h1>Monitor de crédito</h1><select id="fundo" aria-label="fundo"></select><span class="mut" id="ger"></span><button id="tema" class="seg" style="margin-left:auto;border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:6px;padding:4px 9px;cursor:pointer">tema</button></div>
 <div id="avisos"></div>
 <nav id="nav"></nav>
-<div id="t_geral"></div><div id="t_sinais" hidden></div><div id="t_ativos" hidden></div><div id="t_risco" hidden></div><div id="t_agenda" hidden></div><div id="t_mercado" hidden></div>
+<div id="t_geral"></div><div id="t_sinais" hidden></div><div id="t_negocios" hidden></div><div id="t_ativos" hidden></div><div id="t_risco" hidden></div><div id="t_agenda" hidden></div><div id="t_mercado" hidden></div>
 </div>
 <script>
 const D=/*DADOS*/;
@@ -2039,7 +2119,7 @@ const barras=(el,obj,u="%",n=12)=>{const e=Object.entries(obj||{}).filter(([,v])
 // ---------------------------------------------------------------- estado
 const F=D.fundos,AT=D.ativos,E=D.emissores,RD=D.regras_dias;
 let FS=null,SEL=null;
-const ABAS=[["geral","Visão geral"],["sinais","Sinais"],["ativos","Ativos"],["risco","Risco"],["agenda","Agenda"],["mercado","Mercado"]];
+const ABAS=[["geral","Visão geral"],["sinais","Sinais"],["negocios","Negócios"],["ativos","Ativos"],["risco","Risco"],["agenda","Agenda"],["mercado","Mercado"]];
 $("#nav").innerHTML=ABAS.map(([k,t])=>`<button data-a="${k}">${t}</button>`).join("");
 function aba(id){ABAS.forEach(([k])=>{$("#t_"+k).hidden=k!=id;$(`#nav [data-a="${k}"]`).classList.toggle("on",k==id)});try{localStorage.setItem("mc_aba",id)}catch(e){}
   if(window.Plotly)setTimeout(()=>document.querySelectorAll(`#t_${id} .js-plotly-plot`).forEach(g=>Plotly.Plots.resize(g)),40)}
@@ -2115,6 +2195,40 @@ function sinais(){const f=FS,h=f.hoje||{};
   const t5=el=>(rows)=>rows.length?tabela(el,[["cod","Ativo","l"],["mu","Centro (bps)","",v=>sg(v,1)],["q08","Faixa 80%","",(v,x)=>`${br(x.q08,0)} a ${br(x.q92,0)}`],["pct","Posição","",v=>br(v,0)+"%"],["perc","% PL","",v=>br(v,2)]],rows,{click:x=>abrir(x.cod)}):el.innerHTML='<p class="vazio">nenhum</p>';
   t5($("#s_fr"))(f.p5_fracos||[]);t5($("#s_fo"))(f.p5_fortes||[]);
   const dc=f.docs||[];$("#s_doc").innerHTML=dc.length?`<ul class="ls">${dc.map(d=>`<li><span class="tag ${/Fato|Recupera/.test(d.cat)?"t-dn":"t-up"}">${esc(d.cat)}</span> <span class="mut">${dt(d.data)} · ${esc((d.emissor||"").slice(0,32))} · ${br(d.perc,2)}% PL</span><br>${d.link?`<a href="${esc(d.link)}" target="_blank" rel="noopener">${esc(d.assunto||"documento")}</a>`:esc(d.assunto)}</li>`).join("")}</ul>`:'<p class="vazio">nenhum</p>'}
+// ---------------------------------------------------------------- negócios do dia
+let NSEL=null;
+function negocios(){const N=D.negocios_dia||{negocios:[]},L=N.negocios||[];
+  $("#t_negocios").innerHTML=`<section><h2>Negócios de ${dt(N.dia)} na B3 ranqueados pela diferença contra a ANBIMA</h2>
+   <p class="sub">Taxa do negócio − taxa indicativa ANBIMA de ${dt(N.ref_data)}. Positivo = negociado a taxa maior (preço abaixo da marcação). O "esperado" é quanto a ANBIMA tende a andar no dia pelo volume do papel: ≥ R$ 20 mi anda 39% da diferença (acerto 82%), R$ 5–20 mi 30% (73%), R$ 1–5 mi 7% (58%), varejo é ruído.</p>
+   <div class="ctl"><span class="seg" id="ng_v"><button data-v="0">todos</button><button class="on" data-v="50000">≥ R$ 50 mil</button><button data-v="1000000">≥ R$ 1 mi</button><button data-v="5000000">≥ R$ 5 mi</button></span>
+    <span class="seg" id="ng_f"><button class="on" data-f="">mercado</button><button data-f="1">papéis do fundo</button></span>
+    <select id="ng_i"><option value="">todos os índices</option>${[...new Set(L.map(x=>x.idx).filter(Boolean))].map(i=>`<option>${esc(i)}</option>`).join("")}</select><input id="ng_b" placeholder="buscar código ou emissor" aria-label="buscar"></div>
+   <div id="ng_t"></div></section><section id="ng_g" hidden><h2 id="ng_h"></h2><p class="sub" id="ng_s"></p><div id="ng_c" class="pl l"></div></section>`;
+  let vmin=50000,soF="";
+  const go=()=>{const q=$("#ng_b").value.toUpperCase(),i=$("#ng_i").value;
+    const R=L.filter(x=>x.vol>=vmin&&(!soF||FS.pesos[x.cod]!=null)&&(!i||x.idx==i)&&(!q||(x.cod+" "+((N.papeis[x.cod]||{}).emissor||"")).toUpperCase().includes(q))).map((x,k)=>({...x,rank:k+1,abs:Math.abs(x.dif),pl:FS.pesos[x.cod]}));
+    R.length?tabela($("#ng_t"),[["rank","#",""],["hora","Hora","l"],["cod","Ativo","l"],["emissor","Emissor","l",(v,x)=>esc(((N.papeis[x.cod]||{}).emissor||(A(x.cod).emissor||"")).slice(0,26))],["idx","Índice","l"],["vol","R$ mil","",v=>br(v/1e3,0)],
+      ["taxa","Taxa negócio","",v=>br(v,4)],["ref","ANBIMA","",v=>br(v,4)],["dif","Diferença (bps)","",v=>sgt(v,1)+(Math.abs(v)>500?' <span class="tag t-w" title="diferença muito grande: papel estressado ou taxa em outra convenção">verificar</span>':"")],["vol_dia","Papel no dia","",(v,x)=>`R$ ${br(v/1e6,1)} mi · ${x.n_dia} neg.`],
+      ["esperado","ANBIMA esperada (bps)","",(v,x)=>v?`${sgt(v,1)} <span class="mut">${x.acerto}%</span>`:'<span class="mut">ruído</span>'],["pl","% PL do fundo","",v=>v==null?"":br(v,2)]],R,{ord:"abs",h:560,click:x=>grafNeg(x.cod)})
+      :$("#ng_t").innerHTML='<p class="vazio">nenhum negócio com esse filtro</p>'};
+  $("#ng_v").onclick=e=>{if(e.target.dataset.v==null)return;vmin=+e.target.dataset.v;$("#ng_v").querySelectorAll("button").forEach(b=>b.classList.toggle("on",b==e.target));go()};
+  $("#ng_f").onclick=e=>{if(e.target.dataset.f==null)return;soF=e.target.dataset.f;$("#ng_f").querySelectorAll("button").forEach(b=>b.classList.toggle("on",b==e.target));go()};
+  $("#ng_i").onchange=go;$("#ng_b").oninput=go;go();if(NSEL)grafNeg(NSEL)}
+function grafNeg(c){NSEL=c;const N=D.negocios_dia,P=(N.papeis||{})[c],hoje=N.negocios.filter(x=>x.cod==c);if(!P)return;
+  const x0=hoje[0]||{},emi=P.emissor||(A(c).emissor||"");
+  $("#ng_g").hidden=false;$("#ng_h").textContent=`${c} · ${emi}`;
+  $("#ng_s").innerHTML=`${dt(N.dia)}: ${x0.n_dia||0} negócios, R$ ${br((x0.vol_dia||0)/1e6,1)} mi, diferença média ${sgt(x0.dif_dia,1)} bps contra a ANBIMA (${br(x0.ref,4)}%). ANBIMA esperada no dia: ${x0.esperado?sgt(x0.esperado,1)+" bps de taxa (acerto histórico "+x0.acerto+"%)":"sem efeito (volume de varejo)"}.${AT[c]?` <a href="#" id="ng_ab">abrir o ativo</a>`:""}`;
+  const pas=P.neg.d.map((d,i)=>i).filter(i=>P.neg.d[i]<N.dia);
+  const bolha=v=>6+Math.sqrt(Math.max(v,0))*9;
+  plot("ng_c",[{x:P.curva.d,y:P.curva.t,name:"taxa indicativa ANBIMA",mode:"lines+markers",marker:{size:4},line:{color:css("--s1"),width:2}},
+    {x:pas.map(i=>P.neg.d[i]),y:pas.map(i=>P.neg.t[i]),mode:"markers",name:"negócios anteriores",marker:{size:pas.map(i=>bolha(P.neg.v[i])),color:css("--s4"),opacity:.45,line:{width:0}},
+     text:pas.map(i=>`${P.neg.d[i]} ${P.neg.h[i]||""}<br>R$ ${br(P.neg.v[i]*1e3,0)} mil a ${br(P.neg.t[i],4)}%`),hovertemplate:"%{text}<extra></extra>"},
+    {x:hoje.map(()=>N.dia),y:hoje.map(x=>x.taxa),mode:"markers",name:"negócios de "+dt(N.dia),marker:{size:hoje.map(x=>bolha(x.vol/1e6)),color:hoje.map(x=>x.dif>0?css("--dn"):css("--up")),opacity:.75,line:{width:1,color:css("--card")}},
+     text:hoje.map(x=>`${x.hora} · R$ ${br(x.vol/1e3,0)} mil<br>${br(x.taxa,4)}% (${x.dif>0?"+":""}${br(x.dif,1)} bps)`),hovertemplate:"%{text}<extra></extra>"},
+    ...(x0.esperado?[{x:[N.ref_data,N.dia],y:[x0.ref,x0.ref+x0.esperado/100],mode:"lines",name:"ANBIMA esperada",line:{color:css("--s2"),dash:"dot",width:2}}]:[])],
+    {yaxis:{title:{text:"taxa (% a.a.)"},gridcolor:css("--line")},hovermode:"closest"});
+  const ab=$("#ng_ab");if(ab)ab.onclick=e=>{e.preventDefault();abrir(c)};
+  $("#ng_g").scrollIntoView({behavior:"smooth",block:"start"})}
 // ---------------------------------------------------------------- ativos
 function ativos(){const f=FS;
   const rows=(f.ativos||[]).map(x=>{const a=A(x.cod);return{...x,emissor:a.emissor,idx:a.idx,taxa:a.taxa,par:a.pct_par,dur:a.duration,dtx:a.dtaxa_1m,vol:a.vol,
@@ -2202,7 +2316,7 @@ function mercado(){const f=FS;
 function avisos(){const f=FS,m=f.mes,idade=m?Math.round((new Date(D.hoje)-new Date(m+"-28"))/864e5/30):null;
   $("#avisos").innerHTML=(f.fonte!="planilha"&&idade>1?`<div class="aviso">Carteira de ${esc(m)} (${esc(f.fonte)}): a CVM divulga as carteiras com atraso. Para usar a posição de hoje, salve a planilha em <b>carteiras/${esc(f.nome)}.xlsx</b> (colunas ativo e perc_nav).</div>`:"")+
    (f.credito_pct<1?`<div class="aviso">Fundo sem crédito privado com marcação ANBIMA: aparecem só patrimônio, retorno, alocação e captação.</div>`:"")}
-function tudo(){avisos();geral();sinais();ativos();risco();agenda();mercado();let a="geral";try{a=localStorage.getItem("mc_aba")||a}catch(e){};aba(ABAS.some(x=>x[0]==a)?a:"geral")}
+function tudo(){avisos();geral();sinais();negocios();ativos();risco();agenda();mercado();let a="geral";try{a=localStorage.getItem("mc_aba")||a}catch(e){};aba(ABAS.some(x=>x[0]==a)?a:"geral")}
 let ini=0;try{const id=localStorage.getItem("mc_fundo");const i=F.findIndex(f=>f.id==id);if(i>=0)ini=i;else ini=F.findIndex(f=>f.nome=="Dual")}catch(e){};ini=Math.max(ini,0);
 $("#fundo").value=ini;FS=F[ini];tudo();
 </script>
