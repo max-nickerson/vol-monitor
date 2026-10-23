@@ -1799,7 +1799,7 @@ function detalhe(a){SEL=a;const e=E[a.raiz]||{},h=a.hist||{d:[]};const ac=e.acao
     ${e.alav!=null?`<div class="k"><span>Dívida líq./EBITDA</span><b>${br(e.alav,2)}x</b><i>há 1 ano ${br(e.alav_ant,2)}x · cobertura ${br(e.cob,1)}x</i></div>`:""}</div>
    <div class="g2"><div><h3>Taxa indicativa (cheia = ANBIMA, pontilhada = implícita no PU oficial; pontos = negócios B3; ▲ resultado, ◆ fato relevante)</h3><div id="dt_t" class="pl"></div></div>
     <div><h3>PnL acumulado contra a taxa indicativa (bps do PU)</h3><div id="dt_p" class="pl"></div></div></div>
-   <div class="g2"><div><h3>% do PU par</h3><div id="dt_par" class="pl s"></div></div><div><h3>Ação ${ac?esc(e.acao.ticker)+" ("+esc(e.acao.via)+")":""} × taxa (semanal)</h3>${ac?`<div id="dt_ac" class="pl s"></div>`:`<p class="vazio">${e.acao?"série curta para comparar":"emissor sem ação listada"}</p>`}</div></div>
+   <div class="g2"><div><h3>% do PU par — 4 meses e a faixa de 80% para os próximos 5 dias úteis</h3><div id="dt_par" class="pl s"></div></div><div><h3>Ação ${ac?esc(e.acao.ticker)+" ("+esc(e.acao.via)+")":""} × taxa (semanal)</h3>${ac?`<div id="dt_ac" class="pl s"></div>`:`<p class="vazio">${e.acao?"série curta para comparar":"emissor sem ação listada"}</p>`}</div></div>
    ${ac?`<div class="g2"><div><h3>Quem anda primeiro? Correlação ação × Δ taxa por defasagem (barras = intervalo de 95%)</h3><div id="dt_lag" class="pl s"></div><p class="nota">+k: a ação anda k semanas antes da taxa. Correlação de postos (Spearman): negativa = ação cai, taxa sobe. n=${ac.n} semanas; β contemporâneo ${br(ac.beta,2)} bps por 1% da ação.</p></div>
      <div><h3>Ação na semana × Δ taxa na semana</h3><div id="dt_sc" class="pl s"></div></div></div>`:""}
    ${fu?`<h3>Fundamentos (CVM, consolidado; data = trimestre de referência, entregue em ▲)</h3><div class="g2"><div id="dt_f1" class="pl s"></div><div id="dt_ft"></div></div>`:`<p class="vazio">${a.raiz?"emissor sem ITR/DFP na CVM (companhia fechada, securitizadora ou categoria sem demonstrações)":"sem CNPJ do emissor"}</p>`}
@@ -1818,7 +1818,9 @@ function detalhe(a){SEL=a;const e=E[a.raiz]||{},h=a.hist||{d:[]};const ac=e.acao
     const f=b=>p0*Math.exp(b/1e4),ds=[h.d[h.d.length-1],d5.toISOString().slice(0,10)];
     tr5.push({x:ds.concat(ds.slice().reverse()),y:[p0,f(a.prev5.q92),f(a.prev5.q08),p0],fill:"toself",fillcolor:"rgba(194,65,12,.15)",line:{width:0},name:"faixa 80% em 5 dias",hoverinfo:"skip"},
              {x:ds,y:[p0,f(a.prev5.mu)],mode:"lines",line:{color:css("--s2"),dash:"dot"},name:"centro"})}
-  plot("dt_par",tr5,{yaxis:{gridcolor:css("--line")},showlegend:false});
+  const z0=new Date(h.d[h.d.length-1]+"T12:00:00");z0.setDate(z0.getDate()-120);const z1=new Date(h.d[h.d.length-1]+"T12:00:00");z1.setDate(z1.getDate()+12);
+  const vis=h.d.map((d,i)=>d>=z0.toISOString().slice(0,10)?h.pA[i]:null).filter(v=>v!=null).concat(a.prev5?[h.pA[h.pA.length-1]*Math.exp(a.prev5.q08/1e4),h.pA[h.pA.length-1]*Math.exp(a.prev5.q92/1e4)]:[]);
+  plot("dt_par",tr5,{yaxis:{gridcolor:css("--line"),range:vis.length?[Math.min(...vis)-.3,Math.max(...vis)+.3]:undefined},xaxis:{range:[z0.toISOString().slice(0,10),z1.toISOString().slice(0,10)],gridcolor:css("--line")},showlegend:false});
   if(ac){const L=Object.entries(ac.lags).map(([k,v])=>({k:+k,...v}));
     plot("dt_ac",[{x:ac.datas,y:ac.a.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"ação (log %, acum.)",mode:"lines",line:{color:css("--s3")}},{x:ac.datas,y:ac.t.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"taxa (bps, acum.)",yaxis:"y2",mode:"lines",line:{color:css("--s2")}}],
       {yaxis2:{overlaying:"y",side:"right",showgrid:false,title:{text:"bps"}},yaxis:{title:{text:"%"},gridcolor:css("--line")}});
