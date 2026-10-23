@@ -5,17 +5,18 @@ Um arquivo só (`vol_monitor.py`). Para o gestor de um fundo de crédito, mostra
 - o que vem por aí;
 - o que, historicamente, antecipa o preço de cada ativo da carteira.
 
-A página `saida/vol_monitor.html` tem sete abas:
+Monitor dos fundos internos, um arquivo só (`vol_monitor.py`). O seletor no topo troca de fundo e as abas mostram o que importa para o gestor, sem repetir informação.
 
 | aba | o que mostra |
 |---|---|
-| **Hoje** | vol, VaR e backtest; PnL de 12 meses separado em carrego, Δ taxa indicativa e resíduo. Lista "o que olhar agora": negócio da B3 longe da ANBIMA, ação do emissor fora do normal, fato relevante, resultado chegando, amortização, IPCA. Cada item vem com o impacto estimado em bps do PL quando o sinal é estatisticamente útil |
-| **O que vem** | agenda de juros, amortização e vencimento (ANBIMA); próximo resultado de cada emissor, estimado pelo histórico de entregas à CVM; IPCA (IBGE); Focus |
-| **Mercado e notícias** | Ibovespa, dólar, commodities, Treasury; DI1/DAP ao vivo; Tesouro; índices de crédito IDA/JGP; fatos relevantes e comunicados (CVM); notícias por emissor |
-| **Ativos** | tabela da carteira. Ao clicar num ativo:<br>• taxa indicativa (oficial e implícita) com negócios, resultados e fatos relevantes marcados<br>• PnL acumulado contra a taxa<br>• % do PU par<br>• ação × taxa, com correlação por defasagem e intervalo de 95%<br>• fundamentos trimestrais (dívida líquida/EBITDA, cobertura, margem)<br>• agenda e documentos |
-| **O que antecipa** | cada sinal com n, correlação, IC 95% e acerto fora da amostra. Também o valor relativo (spread × alavancagem × duration) e uma tabela por emissor |
-| **Risco** | retorno diário × VaR, contribuição para o risco, sensibilidade a fatores (IDA, JGP, IMA-B, IRF-M, Ibovespa, dólar, Tesouro) e matriz de correlação |
-| **Como é calculado** | as contas |
+| **Visão geral** | patrimônio e captação; retorno 12 meses em % do CDI; carrego da carteira de crédito (% do CDI, DI+ e IPCA+ médios); CS01 (R$ por bp de spread) e DV01 de juro real; VaR em R$; marcação esperada hoje. Gráficos: cota × CDI, retorno esperado para 1/5/10/20 dias com faixa de 80% contra o carrego, alocação (categoria, indexador, emissor, setor, prazo), PnL de 12 meses (carrego × taxa × resíduo), captação líquida diária e liquidez (dias para vender a 20% do volume da B3) |
+| **Sinais** | como a ANBIMA deve fechar hoje (negócios do dia, DAP, ação); situações de 1 a 20 dias com ~70–80% de acerto histórico; mais fracos e mais fortes do modelo de 5 dias; fatos relevantes e avisos aos debenturistas |
+| **Ativos** | tabela da carteira de crédito (taxa, % par, duration, Δ taxa, vol, % do risco, dias para vender, sinais). Ao clicar num ativo:<br>• projeção do % do PU par para 20 dias úteis (mais provável e faixa 10–90%), com a leitura em texto<br>• taxa indicativa com os negócios<br>• PnL contra a taxa<br>• ação × taxa<br>• fundamentos, agenda e documentos |
+| **Risco** | vol, VaR e backtest; cenários (spread +100 bps, juro real, juro pré, default do maior emissor) em % e R$; quem concentra o risco; retorno diário × VaR; fatores; correlação |
+| **Agenda** | amortizações e vencimentos em R$, juros, resultados estimados dos emissores, IPCA; Focus |
+| **Mercado** | índices de crédito e renda fixa; DI1/DAP ao vivo; referências (Ibovespa, dólar, commodities, Treasury); notícias dos emissores do fundo |
+
+**Carteiras:** por padrão vem a última carteira aberta de cada fundo na CVM, que é divulgada com atraso. Para usar a posição atual, salve `carteiras/<nome do fundo>.xlsx` com as colunas `ativo` (`CODIGO - AAAA-MM-DD`) e `perc_nav`. Cota, PL, captação e resgate vêm do informe diário da CVM. A lista de fundos internos sai do painel de fundos (`PAINEL_HTML`).
 
 ## Previsão da marcação ANBIMA de hoje (aba Hoje)
 A previsão é recalculada a cada 15 minutos com os negócios do dia. Para cada ativo, estima quanto o % do PU par da ANBIMA de hoje vai andar, somando:
@@ -85,7 +86,8 @@ Vol, volume, dias sem negócio e o lado dos negócios não ajudam.
 ```
 pip install pandas numpy requests pyarrow openpyxl lxml selenium lightgbm
 python vol_monitor.py modelo                    # cria carteira_modelo.xlsx (15 debêntures mais negociadas)
-python vol_monitor.py carteira.xlsx             # uma vez
+python vol_monitor.py                           # todos os fundos internos
+python vol_monitor.py carteira.xlsx             # uma carteira avulsa
 python vol_monitor.py carteira.xlsx rodar       # a cada 15 min no pregão
 ```
 A carteira tem as colunas `ativo` (`CODIGO - AAAA-MM-DD`, ex.: `HAPV18 - 2030-01-27`) e `perc_nav` (% do PL).

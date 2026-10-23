@@ -32,6 +32,7 @@ Contas (o PnL é sempre lido contra a taxa indicativa):
 import html as H
 import io
 import json
+import os
 import re
 import sys
 import time
@@ -693,7 +694,7 @@ def indices_credito():
         if f.exists():
             j = json.loads(f.read_text(encoding="utf-8"))
             s = pd.Series({pd.Timestamp(a): float(b) for a, b in j["d"]}).sort_index()
-            s = s[(np.log(s / s.rolling(7, center=True, min_periods=3).median())).abs() < 0.05]    # ponto isolado fora da curva (erro da fonte)
+            s = s[(np.log(s / s.rolling(31, center=True, min_periods=5).median())).abs() < 0.04]    # ponto isolado fora da curva (erro da fonte)
             mm = pd.Series({pd.Timestamp(a): float(b) for a, b in j["m"]}).sort_index()
             out[nome] = {"serie": s[~s.index.duplicated()], "mensal": mm[~mm.index.duplicated()]}
     return out
@@ -769,7 +770,7 @@ def noticias(nome, dias=14):
     if not q:
         return q, []
     try:
-        r = get("https://news.google.com/rss/search", params={"q": f'"{q}" when:{dias}d', "hl": "pt-BR", "gl": "BR", "ceid": "BR:pt-419"}, timeout=20, tent=2)
+        r = get("https://news.google.com/rss/search", params={"q": f'"{q}" (ações OR debêntures OR resultado OR dívida OR lucro OR rating OR receita OR prejuízo OR emissão) when:{dias}d', "hl": "pt-BR", "gl": "BR", "ceid": "BR:pt-419"}, timeout=20, tent=2)
         it = ET.fromstring(r.content).findall(".//item")
     except Exception:
         return q, []
@@ -1029,9 +1030,9 @@ def fora_da_amostra(x, y, datas, limiar):
 
 
 # ================================================================== cálculo principal
-def calcula(arq):
+def calcula(c):
     t0 = time.time()
-    a = identifica(le_carteira(arq))
+    a = identifica(c)
     cods = [c for c in a.codigo.dropna()]
     log(f"carteira: {len(a)} linhas, {len(cods)} com código")
     an = anbima_diario()
@@ -1227,9 +1228,7 @@ def calcula(arq):
     idx_c = indices_credito()
     mkt = {k: yahoo(v, "2y") for k, v in MERCADO.items()}
     td_ = tesouro()
-    risco_ = risco(A, diarios, idx_c, mkt, td_)
-    valor_rel = valor_relativo(A, emis)
-    return A, emis, prev, risco_, idx_c, mkt, td_, valor_rel
+    return A, emis, prev, idx_c, mkt, td_, diarios
 
 
 def previsibilidade(pool_lead, pool_ev, pool_fr, pool_neg):
@@ -1294,6 +1293,8 @@ def risco(A, diarios, idx_c, mkt, td_):
     wo = w[of]
     so = float(np.sqrt(wo @ Sg[np.ix_(of, of)] @ wo)) / np.sqrt(252) if of.any() else np.nan
     Rt = pd.DataFrame({c: diarios[c] for c in np.array(cods)[of]}).sort_index()
+    if not len(Rt.columns):
+        Rt = pd.DataFrame(index=pd.DatetimeIndex([]))
     Rt = Rt[Rt.index > HOJE - pd.Timedelta(days=420)]
     wv = pd.Series(wo, index=Rt.columns)
     ret = (Rt.fillna(0) * wv).sum(axis=1)
@@ -1615,70 +1616,355 @@ def sinais(A, emis, prev, ipca, agenda_tot):
 
 
 # ================================================================== página
-def pagina(A, emis, prev, R, idx_c, mkt, td_, vr, ctx):
+
+# ================================================================== fundos internos: carteiras, cota, fluxo
+PAINEL_HTML = Path(os.environ.get("PAINEL_HTML") or Path.home() / "OneDrive/Documents/painel-fundos/painel_fundos.html")
+COD_B3 = re.compile(r"^([A-Z]{4}\d{2}|[A-Z]{4}[A-Z0-9]\d|CR[AI][0-9A-Z]{6,12}|\d{2}[A-L]\d{7})$")
+
+
+def painel_dados():
+    s = PAINEL_HTML.read_text(encoding="utf-8")
+    b = max(re.findall(r"<script>(.*?)</script>", s, re.S), key=len)
+    return json.JSONDecoder().raw_decode(b[b.index("{"):])[0]
+
+
+def carteiras_internas():
+    """Fundos internos (painel de fundos): última carteira aberta (CVM, look-through) ou carteiras/<nome>.xlsx se existir."""
+    D = painel_dados()
+    snd, sec = snd_caracteristicas(), securitizadoras()
+    cad = cadastro_b3().drop_duplicates("cod").set_index("cod")
+    A = pd.DataFrame(D["ativos"], columns=["id", "mes", "ch", "rot", "cat", "grupo", "emis", "perc", "rs", "sp", "du", "x"])
+    out = {}
+    for f in D["fundos"]:
+        if not f["nosso"]:
+            continue
+        m = f["abertos"][-1] if f["abertos"] else None
+        manual = PASTA / "carteiras" / f"{f['nome']}.xlsx"
+        if manual.exists():
+            c = le_carteira(manual).assign(cat="manual", rotulo=lambda d: d.entrada)
+            fonte, m = "planilha", pd.Timestamp(manual.stat().st_mtime, unit="s").strftime("%Y-%m")
+        else:
+            a = A[(A.id == f["id"]) & (A.mes == m)].groupby(["ch", "rot", "cat", "emis"], as_index=False, dropna=False).perc.sum()
+            linhas = []
+            for r in a.itertuples():
+                cod = str(r.ch).strip().upper()
+                venc = None
+                if COD_B3.match(cod):
+                    if cod in snd.index and pd.notna(snd.venc.get(cod)):
+                        venc = pd.Timestamp(snd.venc[cod]).strftime("%Y-%m-%d")
+                    elif cod in sec:
+                        venc = str(sec[cod]["venc"])[:10]
+                    elif cod in cad.index:
+                        venc = pd.to_datetime(cad.venc[cod], dayfirst=True, errors="coerce")
+                        venc = venc.strftime("%Y-%m-%d") if pd.notna(venc) else None
+                linhas.append({"entrada": f"{cod} - {venc}" if venc else str(r.rot), "codigo": cod if venc else None, "venc": venc,
+                               "perc_nav": float(r.perc), "cat": r.cat, "rotulo": str(r.rot), "emis_cvm": r.emis})
+            c, fonte = pd.DataFrame(linhas, columns=["entrada", "codigo", "venc", "perc_nav", "cat", "rotulo", "emis_cvm"]), "CVM (carteira aberta)"
+        cart = f["carteira"][-1] if f.get("carteira") else {}
+        out[f["id"]] = {"id": f["id"], "nome": f["nome"], "cnpj": f["cnpj"], "pl": f.get("pl"), "mes": m, "fonte": fonte, "carteira": c,
+                        "ret_m": f.get("ret", {}), "cats_cvm": cart.get("cats", {}) if cart else {}}
+    return out, D.get("cdi", {})
+
+
+def fundo_diario(cnpjs, meses=14):
+    """Informe diário da CVM dos fundos: cota, PL, captação e resgate (últimos `meses`)."""
+    alvo = {re.sub(r"\D", "", c) for c in cnpjs if c}
+    partes = []
+    for p in pd.period_range(HOJE - pd.DateOffset(months=meses), HOJE, freq="M"):
+        f = DADOS / "cvm" / f"inf_diario_fi_{p.strftime("%Y%m")}.zip"
+        if not f.exists() or (p >= (HOJE - pd.DateOffset(months=1)).to_period("M") and velho(f, 12)):
+            try:
+                f.write_bytes(get(f"{CVM.replace('CIA_ABERTA/', '')}FI/DOC/INF_DIARIO/DADOS/inf_diario_fi_{p.strftime("%Y%m")}.zip", timeout=300).content)
+            except requests.RequestException:
+                pass
+        if not f.exists():
+            continue
+        z = zipfile.ZipFile(f)
+        d = pd.read_csv(z.open(z.namelist()[0]), sep=";", encoding="latin1", dtype=str)
+        col = "CNPJ_FUNDO_CLASSE" if "CNPJ_FUNDO_CLASSE" in d else "CNPJ_FUNDO"
+        d = d[d[col].str.replace(r"\D", "", regex=True).isin(alvo)]
+        partes.append(pd.DataFrame({"cnpj": d[col].str.replace(r"\D", "", regex=True).values, "data": pd.to_datetime(d.DT_COMPTC).values,
+                                    "cota": pd.to_numeric(d.VL_QUOTA, errors="coerce").values, "pl": pd.to_numeric(d.VL_PATRIM_LIQ, errors="coerce").values,
+                                    "capt": pd.to_numeric(d.CAPTC_DIA, errors="coerce").values, "resg": pd.to_numeric(d.RESG_DIA, errors="coerce").values,
+                                    "cotistas": pd.to_numeric(d.NR_COTST, errors="coerce").values}))
+    if not partes:
+        return {}
+    x = pd.concat(partes).sort_values(["cnpj", "data"]).drop_duplicates(["cnpj", "data"], keep="last")
+    return {c: g.set_index("data") for c, g in x.groupby("cnpj")}
+
+
+def yield_ativo(x, cdi_aa, ipca_e):
+    """Taxa total esperada (% a.a.) do papel pela taxa indicativa: CDI+s, %CDI, IPCA+r, pré."""
+    t = x.get("taxa")
+    if t is None or t != t:
+        return None
+    i = x.get("idx")
+    if i == "DI+":
+        return ((1 + cdi_aa) * (1 + t / 100) - 1) * 100
+    if i == "%DI":
+        return cdi_aa * t
+    if i == "IPCA":
+        return ((1 + ipca_e) * (1 + t / 100) - 1) * 100
+    if i == "PRE":
+        return t
+    return None
+
+
+def cota_fluxo(out, f, fdiario):
+    """Cota, retorno contra o CDI e captação líquida do informe diário da CVM."""
+    fd = fdiario.get(re.sub(r"\D", "", f["cnpj"] or ""))
+    if fd is not None and len(fd) > 20:
+        cota = fd.cota.dropna()
+        cdi_d = sgs(12, HOJE - pd.DateOffset(years=4)).reindex(cota.index).fillna(0) / 100
+        idx_cdi = (1 + cdi_d).cumprod()
+        r_ = lambda d0: (float(cota.iloc[-1] / cota[cota.index <= d0].iloc[-1] - 1) * 100, float(idx_cdi.iloc[-1] / idx_cdi[idx_cdi.index <= d0].iloc[-1] - 1) * 100) if (cota.index <= d0).any() else (None, None)
+        per = {"mes": cota.index[-1].replace(day=1) - pd.Timedelta(days=1), "ano": pd.Timestamp(cota.index[-1].year - 1, 12, 31),
+               "12m": cota.index[-1] - pd.DateOffset(years=1)}
+        out["perf"] = {k: {"fundo": a, "cdi": b, "pct_cdi": a / b * 100 if a is not None and b else None} for k, (a, b) in ((k, r_(d)) for k, d in per.items())}
+        base = cota[cota.index >= cota.index[-1] - pd.DateOffset(years=1)]
+        ic = idx_cdi.reindex(base.index)
+        out["cota_serie"] = {"d": [d.strftime("%Y-%m-%d") for d in base.index], "fundo": [round(v / base.iloc[0] * 100, 4) for v in base],
+                             "cdi": [round(v / ic.iloc[0] * 100, 4) for v in ic]}
+        fl = (fd.capt.fillna(0) - fd.resg.fillna(0))
+        plx = fd.pl.dropna()
+        out["fluxo"] = {k: float(fl.iloc[-k:].sum() / plx.iloc[-k - 1] * 100) if len(plx) > k else None for k in (5, 20, 60)}
+        f6 = fl[fl.index >= fl.index[-1] - pd.DateOffset(months=6)]
+        out["fluxo_serie"] = {"d": [d.strftime("%Y-%m-%d") for d in f6.index], "v": [round(v / 1e6, 2) for v in f6]}
+        out["pl_atual"] = float(plx.iloc[-1] / 1e6)
+        out["cotistas"] = int(fd.cotistas.dropna().iloc[-1]) if fd.cotistas.notna().any() else None
+        out["data_cota"] = cota.index[-1].strftime("%Y-%m-%d")
+        out["pl"] = out["pl_atual"]
+
+
+def consolida_fundo(f, A, emis, diarios, idx_c, mkt, td_, fdiario, cdi_aa, ipca_e, ipca_d, cdi_m):
+    """Visão de um fundo: alocação, carrego, sensibilidades, risco, liquidez, cenários, sinais, agenda em R$, projeção, cota e fluxo."""
+    c = f["carteira"]
+    pl = (f.get("pl") or 0) * 1e6                                              # R$
+    cod_w = c.dropna(subset=["codigo"]).groupby("codigo").perc_nav.sum()
+    Af = A[A.codigo.isin(cod_w.index)].copy()
+    Af["perc_nav"] = Af.codigo.map(cod_w)
+    Af["coberto"] = True
+    resto = c[c.codigo.isna()]
+    out = {"id": f["id"], "nome": f["nome"], "cnpj": f["cnpj"], "pl": f.get("pl"), "mes": f["mes"], "fonte": f["fonte"],
+           "pesos": {k: round(float(v), 4) for k, v in cod_w.items()},
+           "outros": [{"rotulo": r.rotulo, "cat": r.cat, "perc": round(float(r.perc_nav), 3)} for r in resto.sort_values("perc_nav", ascending=False).head(60).itertuples()]}
+    # alocação
+    cat = c.groupby("cat").perc_nav.sum().sort_values(ascending=False) if len(c) else pd.Series(dtype=float)
+    out["aloc_cat"] = {k: round(float(v), 2) for k, v in cat.items()}
+    if Af.empty:                                                       # fundo sem crédito com código: só alocação, cota e fluxo
+        out.update({"credito_pct": 0.0, "ativos": [], "raizes": [], "risco": None, "hoje": {"impacto_bps": 0, "n": 0, "ativos": []}, "regras": [],
+                    "agenda": [], "docs": [], "carrego": {}, "sens": {}, "cenarios": [], "projecao": []})
+        cota_fluxo(out, f, fdiario)
+        return out
+    cred = Af[Af.taxa.notna()]
+    out["aloc_idx"] = {k: round(float(v), 2) for k, v in Af.groupby("idx").perc_nav.sum().sort_values(ascending=False).items()}
+    Af["emis_nome"] = [(emis.get(r) or {}).get("nome") or e for r, e in zip(Af.raiz, Af.emissor)]
+    Af["setor"] = [(emis.get(r) or {}).get("setor") or "—" for r in Af.raiz]
+    out["aloc_emissor"] = {str(k)[:40]: round(float(v), 2) for k, v in Af.groupby("emis_nome").perc_nav.sum().sort_values(ascending=False).head(15).items()}
+    out["aloc_setor"] = {str(k)[:40]: round(float(v), 2) for k, v in Af.groupby("setor").perc_nav.sum().sort_values(ascending=False).head(12).items()}
+    out["aloc_prazo"] = {k: round(float(v), 2) for k, v in Af.groupby(pd.cut(Af.duration, [-1, 1, 3, 5, 100], labels=["até 1 ano", "1–3 anos", "3–5 anos", "mais de 5"]),
+                                                                       observed=True).perc_nav.sum().items()}
+    # liquidez: dias para vender a posição a 20% do volume médio diário na B3 (30 dias)
+    adv = Af.giro_30d.fillna(0) * 1e6 / 21
+    pos = Af.perc_nav / 100 * pl
+    dias = np.where(adv > 0, pos / (0.2 * adv.replace(0, np.nan)), np.inf)
+    Af["dias_liq"] = dias
+    out["liquidez"] = {k: round(float(Af.perc_nav[m].sum()), 2) for k, m in (("até 1 dia", dias <= 1), ("1–5 dias", (dias > 1) & (dias <= 5)),
+                                                                             ("5–20 dias", (dias > 5) & (dias <= 20)), ("mais de 20 dias", (dias > 20) & np.isfinite(dias)),
+                                                                             ("sem negócio em 30 dias", ~np.isfinite(dias)))}
+    # carrego e sensibilidades
+    y = np.array([yield_ativo(r, cdi_aa, ipca_e) or np.nan for r in Af.to_dict("records")])
+    ok = np.isfinite(y)
+    wy = Af.perc_nav.values[ok]
+    out["carrego"] = {"taxa_media": float((y[ok] * wy).sum() / wy.sum()) if ok.any() else None, "cobre": float(wy.sum()),
+                      "cdi": cdi_aa * 100, "pct_cdi": float((y[ok] * wy).sum() / wy.sum() / (cdi_aa * 100) * 100) if ok.any() else None,
+                      "spread_di": float((cred[cred.idx == "DI+"].taxa * cred[cred.idx == "DI+"].perc_nav).sum() / max(cred[cred.idx == "DI+"].perc_nav.sum(), 1e-9)) if (cred.idx == "DI+").any() else None,
+                      "taxa_ipca": float((cred[cred.idx == "IPCA"].taxa * cred[cred.idx == "IPCA"].perc_nav).sum() / max(cred[cred.idx == "IPCA"].perc_nav.sum(), 1e-9)) if (cred.idx == "IPCA").any() else None}
+    dm = np.where(Af.idx.isin(["IPCA", "PRE", "IGPM"]), Af.duration / (1 + Af.taxa.fillna(0) / 100), Af.duration).astype(float)
+    Af["dm"] = dm
+    w = Af.perc_nav.values / 100
+    out["sens"] = {"duration_spread": float(np.nansum(w * dm) / max(w.sum(), 1e-9)), "cs01": float(np.nansum(w * dm) * pl * 1e-4),
+                   "dv01_ipca": float(np.nansum(w * dm * (Af.idx == "IPCA")) * pl * 1e-4), "dv01_pre": float(np.nansum(w * dm * (Af.idx == "PRE")) * pl * 1e-4)}
+    emi_w = Af.groupby("raiz").perc_nav.sum().sort_values(ascending=False)
+    maior = emi_w.index[0] if len(emi_w) else None
+    out["cenarios"] = [
+        {"nome": "Spread de crédito +100 bps (todos os papéis)", "pct": -float(np.nansum(w * dm)), "rs": -float(np.nansum(w * dm) * pl / 100)},
+        {"nome": "Spread +50 bps só nos papéis DI+", "pct": -float(np.nansum(w * dm * (Af.idx == "DI+"))) / 2, "rs": -float(np.nansum(w * dm * (Af.idx == "DI+")) * pl / 200)},
+        {"nome": "Juro real (NTN-B) +100 bps", "pct": -float(np.nansum(w * dm * (Af.idx == "IPCA"))), "rs": -float(np.nansum(w * dm * (Af.idx == "IPCA")) * pl / 100)},
+        {"nome": "Juro pré +100 bps", "pct": -float(np.nansum(w * dm * (Af.idx == "PRE"))), "rs": -float(np.nansum(w * dm * (Af.idx == "PRE")) * pl / 100)},
+        {"nome": f"Default do maior emissor ({str((emis.get(maior) or {}).get('nome') or maior)[:30]}), recuperação 40%", "pct": -float(emi_w.iloc[0] * 0.6) if len(emi_w) else 0,
+         "rs": -float(emi_w.iloc[0] * 0.6 * pl / 100) if len(emi_w) else 0}]
+    # risco (VaR, backtest, fatores, contribuição)
+    Ar = Af.copy()
+    out["risco"] = risco(Ar, diarios, idx_c, mkt, td_) if len(Ar) and Ar.vol.notna().any() else None
+    Af["contrib_pct"] = Ar.get("contrib_pct")
+    # hoje (marcação esperada) e regras / modelo 5 dias
+    ph = [(r.codigo, r.prev_hoje, r.perc_nav) for r in Af.itertuples() if isinstance(r.prev_hoje, dict)]
+    out["hoje"] = {"impacto_bps": float(sum(p["total"] * wv / 100 for _, p, wv in ph)), "n": len(ph),
+                   "ativos": sorted([{"cod": c_, "bps": p["total"], "imp": p["total"] * wv / 100, "perc": wv,
+                                      "txt": "; ".join(f"{k}: {v['txt']}" for k, v in p["comp"].items())} for c_, p, wv in ph], key=lambda d: -abs(d["imp"]))[:25]}
+    regras = [{"cod": r.codigo, "perc": r.perc_nav, **g} for r in Af.itertuples() if isinstance(r.regras_dias, list) for g in r.regras_dias]
+    out["regras"] = regras
+    p5 = Af[Af.prev5.map(lambda p: isinstance(p, dict))]
+    out["p5_fracos"] = [{"cod": r.codigo, "perc": r.perc_nav, "pct": r.prev5["pct_univ"], "mu": r.prev5["mu"], "q08": r.prev5["q08"], "q92": r.prev5["q92"]}
+                        for r in p5.sort_values("perc_nav", ascending=False).itertuples() if r.prev5["pct_univ"] <= 10][:15]
+    out["p5_fortes"] = [{"cod": r.codigo, "perc": r.perc_nav, "pct": r.prev5["pct_univ"], "mu": r.prev5["mu"], "q08": r.prev5["q08"], "q92": r.prev5["q92"]}
+                        for r in p5.sort_values("perc_nav", ascending=False).itertuples() if r.prev5["pct_univ"] >= 90][:15]
+    # projeção do fundo contra o carrego (bps do PL): mediana dos sinais (regra > modelo) e faixa pela vol do fundo
+    sig = {h: 0.0 for h in (1, 5, 10, 20)}
+    for r in Af.itertuples():
+        wv = r.perc_nav / 100
+        rg = r.regras_dias[0]["regra"] if isinstance(r.regras_dias, list) and r.regras_dias else None
+        for h in sig:
+            if rg and str(h) in REGRAS_DIAS[rg]["h"]:
+                sig[h] += wv * REGRAS_DIAS[rg]["h"][str(h)]["mediana"]
+            elif isinstance(r.prev5, dict):
+                sig[h] += wv * r.prev5["mu"] * min(h, 5) / 5
+            if h == 1 and isinstance(r.prev_hoje, dict):
+                sig[h] += wv * r.prev_hoje["total"]
+    sd_d = (out["risco"]["vol"] / np.sqrt(252) * 100) if out["risco"] else None           # bps do PL por dia
+    tx = out["carrego"]["taxa_media"]
+    out["projecao"] = [{"h": h, "sinais": sig[h], "carrego_vs_cdi": ((tx or cdi_aa * 100) - cdi_aa * 100) * 100 * h / 252 * (out["carrego"]["cobre"] / 100),
+                        "lo": sig[h] - 1.2816 * sd_d * np.sqrt(h) if sd_d else None, "hi": sig[h] + 1.2816 * sd_d * np.sqrt(h) if sd_d else None} for h in (1, 5, 10, 20)]
+    # PnL 12m (bps do PL, pesos de hoje)
+    out["pnl12"] = {k: float(np.nansum(Af[f"pnl_{k}"].astype(float) * Af.perc_nav / 100)) for k in ("car", "mtm", "res")}
+    dts, acc = None, {}
+    for r in Af.itertuples():
+        h_ = r.hist if isinstance(r.hist, dict) else {}
+        if not h_.get("d"):
+            continue
+        s_ = pd.DataFrame({k: pd.Series(h_[k], index=pd.to_datetime(h_["d"]), dtype=float) for k in ("car", "mtm", "res")})
+        s_ = s_[s_.index > HOJE - pd.Timedelta(days=365)].fillna(0) * r.perc_nav / 100
+        for k in s_:
+            acc[k] = acc[k].add(s_[k], fill_value=0) if k in acc else s_[k]
+    if acc:
+        P = pd.DataFrame(acc).sort_index().cumsum()
+        P = P.iloc[::2]
+        out["pnl_serie"] = {"d": [d.strftime("%Y-%m-%d") for d in P.index], **{k: [round(v, 1) for v in P[k]] for k in P}}
+    # agenda em R$ (amortização/vencimento estimados pela % do valor nominal × posição)
+    ag = []
+    for r in Af.itertuples():
+        for e in (r.agenda if isinstance(r.agenda, list) else []):
+            pct = num([str(e.get("pct", "")).replace("%", "").strip()]).iloc[0]
+            amort = bool(re.search(r"Amortiza|Vencimento|Resgate", e["evento"], re.I))
+            ag.append({"data": pd.to_datetime(e["data"], dayfirst=True).strftime("%Y-%m-%d"), "cod": r.codigo, "evento": e["evento"], "pct": e.get("pct"),
+                       "rs": float(pct / 100 * r.perc_nav / 100 * pl / ((r.pct_par or 100) / 100)) / 1e6 if amort and pct == pct else None, "perc": r.perc_nav})
+        if r.venc and HOJE <= pd.Timestamp(r.venc) <= HOJE + pd.Timedelta(days=180):
+            ag.append({"data": r.venc, "cod": r.codigo, "evento": "Vencimento", "pct": "100%", "rs": float(r.perc_nav / 100 * pl) / 1e6, "perc": r.perc_nav})
+    for rz in set(Af.raiz.dropna()):
+        e = emis.get(rz) or {}
+        if e.get("prox_resultado"):
+            pr = e["prox_resultado"]
+            ag.append({"data": pr["esperado"], "cod": ", ".join(Af[Af.raiz == rz].codigo.head(3)), "evento": f"Resultado {pr['ref'][5:7]}/{pr['ref'][:4]} (estimado {pr['min'][8:]}/{pr['min'][5:7]}–{pr['max'][8:]}/{pr['max'][5:7]})",
+                       "pct": "", "rs": None, "perc": float(Af[Af.raiz == rz].perc_nav.sum())})
+    ag += [{"data": d.strftime("%Y-%m-%d"), "cod": "IPCA", "evento": "Divulgação do IPCA (IBGE)", "pct": "", "rs": None, "perc": float(Af[Af.idx == "IPCA"].perc_nav.sum())} for d in ipca_d[:3]]
+    out["agenda"] = sorted([a for a in ag if HOJE.strftime("%Y-%m-%d") <= a["data"] <= (HOJE + pd.Timedelta(days=120)).strftime("%Y-%m-%d")], key=lambda a: a["data"])
+    # documentos e notícias dos emissores do fundo (7 dias = alerta)
+    relev = lambda d: d["cat"] in ("Fato Relevante", "Aviso aos Debenturistas", "Escrituras e aditamentos de debêntures",
+                                   "Informações de Companhias em Recuperação Judicial ou Extrajudicial") or re.search(r"rating|waiver|resgate|recompra|vencimento antecipado|AGD|reestrutura", d.get("assunto") or "", re.I)
+    vist = set()
+    out["docs"] = [d for d in sorted([{**d, "emissor": (emis.get(rz) or {}).get("nome"), "perc": float(Af[Af.raiz == rz].perc_nav.sum())}
+                                      for rz in set(Af.raiz.dropna()) for d in (emis.get(rz) or {}).get("docs", []) if relev(d)], key=lambda d: d["data"], reverse=True)
+                   if not ((d["emissor"], d["assunto"]) in vist or vist.add((d["emissor"], d["assunto"])))][:25]
+    out["raizes"] = sorted(set(Af.raiz.dropna()))
+    cota_fluxo(out, f, fdiario)
+    # tabela de ativos do fundo (só o que é do fundo; o resto do ativo vem de D.ativos)
+    out["ativos"] = [{"cod": r.codigo, "perc": round(float(r.perc_nav), 4), "rs": round(float(r.perc_nav / 100 * (out["pl"] or 0)), 2),
+                      "contrib": None if not isinstance(r.contrib_pct, float) or r.contrib_pct != r.contrib_pct else round(r.contrib_pct, 2),
+                      "dias_liq": None if not np.isfinite(r.dias_liq) else round(float(r.dias_liq), 1), "setor": r.setor, "emis": r.emis_nome}
+                     for r in Af.sort_values("perc_nav", ascending=False).itertuples()]
+    out["credito_pct"] = float(Af.perc_nav.sum())
+    return out
+
+
+# ================================================================== página e execução
+CAMPOS_ATIVO = ["codigo", "emissor", "raiz", "idx", "indexador", "cupom", "venc", "tipo", "lastro", "duration", "taxa", "data_taxa", "pct_par", "pu", "vol",
+                "fonte", "dtaxa_1m", "ret_1m", "pnl_car", "pnl_mtm", "pnl_res", "pnl_total", "giro_30d", "neg_30d", "hist", "agenda", "prev_hoje", "prev5", "regras_dias"]
+
+
+def pagina(F, A, emis, idx_c, mkt, td_, ctx):
     limpa = lambda o: None if isinstance(o, float) and not np.isfinite(o) else o
-    ativos = [{k: limpa(v) for k, v in r.items() if not k.startswith("_")} for r in A.drop(columns=["faixa"], errors="ignore").to_dict("records")]
+    corte = (HOJE - pd.DateOffset(years=2)).strftime("%Y-%m-%d")
+    at = {}
+    for r in A[A.coberto].to_dict("records"):
+        x = {k: limpa(r.get(k)) for k in CAMPOS_ATIVO}
+        h = x.get("hist") or {}
+        if h.get("d"):
+            i0 = next((i for i, d in enumerate(h["d"]) if d >= corte), len(h["d"]))
+            x["hist"] = {k: (v[i0:] if isinstance(v, list) else v) for k, v in h.items() if k != "neg"}
+            ng = h.get("neg") or {"d": []}
+            j0 = next((i for i, d in enumerate(ng["d"]) if d >= corte), len(ng["d"]))
+            x["hist"]["neg"] = {k: v[j0:] for k, v in ng.items()}
+        at[r["codigo"]] = x
     m_ = {}
     for nome, y in mkt.items():
         if y and len(y["serie"]) > 30:
-            s = y["serie"]
-            lr = np.log(s).diff().dropna()
+            s_ = y["serie"]
+            lr = np.log(s_).diff().dropna()
             d1 = (y["preco"] / y["ant"] - 1) * 100 if y["preco"] and y["ant"] else None
             z = d1 / (lr.tail(250).std() * 100) if d1 is not None else None
-            if z is not None and abs(z) > 8:                       # cotação impossível (erro da fonte): não mostra
+            if z is not None and abs(z) > 8:
                 d1 = z = None
-            m_[nome] = {"preco": y["preco"], "d1": d1, "z": z,
-                        "m1": float((s.iloc[-1] / s.iloc[-22] - 1) * 100), "d": [d.strftime("%Y-%m-%d") for d in s.index[-130:]], "v": [round(v, 4) for v in s.values[-130:]]}
+            m_[nome] = {"preco": y["preco"], "d1": d1, "z": z, "m1": float((s_.iloc[-1] / s_.iloc[-22] - 1) * 100)}
     ic = {}
     for nome, d in idx_c.items():
-        s = d["serie"]
-        if len(s) > 30:
-            lr = np.log(s).diff().dropna()
+        s_ = d["serie"]
+        if len(s_) > 30:
+            lr = np.log(s_).diff().dropna()
             ic[nome] = {"d1": float(lr.iloc[-1] * 100), "z": float(lr.iloc[-1] / lr.tail(250).std()) if lr.tail(250).std() > 0 else None,
-                        "m1": float((s.iloc[-1] / s[s.index <= s.index[-1] - pd.Timedelta(days=30)].iloc[-1] - 1) * 100),
+                        "m1": float((s_.iloc[-1] / s_[s_.index <= s_.index[-1] - pd.Timedelta(days=30)].iloc[-1] - 1) * 100),
                         "a12": float((np.prod(1 + d["mensal"].tail(12)) - 1) * 100) if len(d["mensal"]) >= 12 else None,
-                        "data": s.index[-1].strftime("%Y-%m-%d"), "d": [q.strftime("%Y-%m-%d") for q in s.index], "v": [round(v, 6) for v in s.values]}
-    tj = {c: {"d": [d.strftime("%Y-%m-%d") for d in td_.index[-500:]], "v": [None if v != v else round(v, 3) for v in td_[c].values[-500:]]} for c in td_.columns} if len(td_) else {}
-    dados = {"gerado": datetime.now().strftime("%d/%m/%Y %H:%M"), "hoje": HOJE.strftime("%Y-%m-%d"), "ativos": ativos,
-             "emissores": json.loads(json.dumps(emis, default=lambda o: None if isinstance(o, float) else str)), "prev": prev, "risco": R,
-             "mercado": m_, "indices": ic, "tesouro": tj, "valor_rel": vr, **ctx}
+                        "data": s_.index[-1].strftime("%Y-%m-%d"), "d": [q.strftime("%Y-%m-%d") for q in s_.index], "v": [round(v, 5) for v in s_.values]}
+    raizes = {r for f in F for r in f.get("raizes", [])}
+    em = {r: e for r, e in emis.items() if r in raizes}
+    dados = {"gerado": datetime.now().strftime("%d/%m/%Y %H:%M"), "hoje": HOJE.strftime("%Y-%m-%d"), "fundos": F, "ativos": at, "emissores": em,
+             "mercado": m_, "indices": ic, "regras_dias": REGRAS_DIAS, **ctx}
     txt = json.dumps(dados, ensure_ascii=False, default=lambda o: None if isinstance(o, float) and not np.isfinite(o) else (o.isoformat() if hasattr(o, "isoformat") else str(o)))
     txt = re.sub(r"\bNaN\b|\b-?Infinity\b", "null", txt).replace("</", "<\\/")
     return HTML.replace("/*DADOS*/", txt)
 
 
-def uma_vez(arq):
+def uma_vez(arq=None):
     global HOJE
     HOJE = pd.Timestamp.today().normalize()
-    A, emis, prev, R, idx_c, mkt, td_, vr = calcula(arq)
-    ag = []
-    for x in A[A.coberto].itertuples():
-        for e in x.agenda if isinstance(x.agenda, list) else []:
-            ag.append({"data": pd.to_datetime(e["data"], dayfirst=True).strftime("%Y-%m-%d"), "ativo": x.codigo, "emissor": x.emissor, "evento": e["evento"],
-                       "pct": e["pct"], "peso": x.perc_nav})
-    ipca = ipca_datas()
-    for r, e in emis.items():
-        if e.get("prox_resultado"):
-            ag.append({"data": e["prox_resultado"]["esperado"], "ativo": ", ".join(e["codigos"][:3]), "emissor": e["nome"],
-                       "evento": f"Resultado {e['prox_resultado']['ref'][5:7]}/{e['prox_resultado']['ref'][:4]} (estimado)", "pct": "", "peso": e["perc"]})
-    for x in A[A.coberto].itertuples():
-        if x.venc and HOJE <= pd.Timestamp(x.venc) <= HOJE + pd.Timedelta(days=180):
-            ag.append({"data": x.venc, "ativo": x.codigo, "emissor": x.emissor, "evento": "Vencimento", "pct": "100%", "peso": x.perc_nav})
-    ag += [{"data": d.strftime("%Y-%m-%d"), "ativo": "IPCA", "emissor": "IBGE", "evento": "Divulgação do IPCA", "pct": "", "peso": float(A[A.idx.eq("IPCA")].perc_nav.sum())} for d in ipca[:4]]
-    ag = sorted([g for g in ag if g["data"] >= HOJE.strftime("%Y-%m-%d")], key=lambda g: g["data"])
+    t0 = time.time()
+    if arq:
+        c = le_carteira(arq).assign(cat="planilha", rotulo=lambda d: d.entrada)
+        fundos = {"planilha": {"id": "planilha", "nome": Path(arq).stem, "cnpj": None, "pl": None, "mes": HOJE.strftime("%Y-%m"), "fonte": "planilha", "carteira": c}}
+    else:
+        fundos, _ = carteiras_internas()
+    U = pd.concat([f["carteira"].dropna(subset=["codigo"]) for f in fundos.values()])
+    U = U.groupby("codigo", as_index=False).agg(venc=("venc", "first"), perc_nav=("perc_nav", "max"), entrada=("entrada", "first"))
+    log(f"fundos: {len(fundos)}; ativos com código (união): {len(U)}")
+    A, emis, prev, idx_c, mkt, td_, diarios = calcula(U)
+    cdi = sgs(12, HOJE - pd.DateOffset(years=4))
+    cdi_aa = float((1 + cdi.iloc[-1] / 100) ** 252 - 1) if len(cdi) else 0.14
+    fo = focus()
+    ipca_e = float(list((fo.get("IPCA") or {}).get("anos", {}).values())[1]) / 100 if len((fo.get("IPCA") or {}).get("anos", {})) > 1 else 0.045
+    ipca_d = ipca_datas()
+    fd = fundo_diario([f["cnpj"] for f in fundos.values()])
+    F = []
+    for f in fundos.values():
+        try:
+            F.append(consolida_fundo(f, A, emis, diarios, idx_c, mkt, td_, fd, cdi_aa, ipca_e, ipca_d, None))
+        except Exception as e:
+            log(f"fundo {f['nome']}: erro {type(e).__name__} {e}")
+    F.sort(key=lambda x: -(x.get("credito_pct") or 0))
     news = {}
-    for e in [e for e in sorted(emis.values(), key=lambda e: -e["perc"]) if not re.search(r"SECURITIZ", str(e["nome"]).upper())][:20]:
-        q, it = noticias(e["nome"])
-        if it:
-            news[e["raiz"]] = {"busca": q, "itens": it}
-    ctx = {"agenda": ag, "sinais": sinais(A, emis, prev, ipca, ag), "noticias": news, "juros": A.attrs.get("juros") or juros_b3(), "focus": focus(),
-           "estudo": ESTUDO, "regras_dias": REGRAS_DIAS, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref"), "info5": A.attrs.get("info5"), "estudo5": ESTUDO5}
-    h = pagina(A, emis, prev, R, idx_c, mkt, td_, vr, ctx)
+    peso = pd.Series({r: sum((x.get("pl") or 0) * sum(w for c_, w in x["pesos"].items() if (A.set_index("codigo").raiz.get(c_) == r)) for x in F) for r in {r for x in F for r in x.get("raizes", [])}})
+    for r in peso.sort_values(ascending=False).index[:30]:
+        e = emis.get(r) or {}
+        if e.get("nome") and not re.search(r"SECURITIZ", str(e["nome"]).upper()):
+            q, it = noticias(e["nome"])
+            if it:
+                news[r] = {"busca": q, "itens": it}
+    ctx = {"juros": A.attrs.get("juros") or juros_b3(), "focus": fo, "noticias": news, "info5": A.attrs.get("info5"), "data_ref": A.attrs.get("data_ref")}
+    h = pagina(F, A, emis, idx_c, mkt, td_, ctx)
     (SAIDA / "vol_monitor.html").write_text(h, encoding="utf-8")
-    log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB")
+    log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB, {len(F)} fundos ({time.time() - t0:.0f}s)")
 
 
-def rodar(arq):
+def rodar(arq=None):
     while True:
         try:
             uma_vez(arq)
@@ -1688,224 +1974,239 @@ def rodar(arq):
         time.sleep(900 if 9 <= hr <= 18.5 and datetime.now().weekday() < 5 else 3600)
 
 
-HTML = r"""<title>Vol monitor de crédito</title>
+HTML = r"""<title>Monitor de crédito</title>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/3.1.0/plotly.min.js"></script>
 <script>if(!window.Plotly)document.write('<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@3.1.0/plotly.min.js"><\/script>')</script>
 <style>
-:root{--bg:#f6f7f8;--card:#fff;--ink:#14191d;--mut:#5d6873;--line:#dfe3e7;--acc:#0f766e;--acc2:#d9efec;--warn:#b45309;--warn2:#fdf0dc;--crit:#b42318;--crit2:#fde5e2;--ok:#15803d;--chip:#eef1f3;--s1:#0f766e;--s2:#c2410c;--s3:#6d28d9;--s4:#64748b;color-scheme:light}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#111416;--card:#1a1e21;--ink:#e6e8ea;--mut:#98a2ab;--line:#2b3136;--acc:#3fbfa9;--acc2:#173731;--warn:#e0a03a;--warn2:#3a2c14;--crit:#f2665a;--crit2:#3d1b18;--ok:#4cc38a;--chip:#252b2f;--s1:#3fbfa9;--s2:#f08a4b;--s3:#a78bfa;--s4:#94a3b8;color-scheme:dark}}
-:root[data-theme="dark"]{--bg:#111416;--card:#1a1e21;--ink:#e6e8ea;--mut:#98a2ab;--line:#2b3136;--acc:#3fbfa9;--acc2:#173731;--warn:#e0a03a;--warn2:#3a2c14;--crit:#f2665a;--crit2:#3d1b18;--ok:#4cc38a;--chip:#252b2f;--s1:#3fbfa9;--s2:#f08a4b;--s3:#a78bfa;--s4:#94a3b8;color-scheme:dark}
+:root{--bg:#f5f6f7;--card:#fff;--ink:#121820;--mut:#5b6672;--line:#e1e5e9;--acc:#0b6e66;--acc2:#dff0ed;--up:#13803c;--dn:#b42318;--warn:#a85b06;--warn2:#fdf0dc;--crit2:#fde6e3;--chip:#eef1f4;
+ --s1:#0b6e66;--s2:#c2410c;--s3:#5b4bd1;--s4:#7c8794;--band:rgba(11,110,102,.16);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1316;--card:#171c20;--ink:#e6e9ec;--mut:#9aa4ae;--line:#283037;--acc:#3fc0ad;--acc2:#16332e;--up:#47c47c;--dn:#f0675b;--warn:#e3a33f;--warn2:#3a2c14;--crit2:#3c1c19;--chip:#232a30;
+ --s1:#3fc0ad;--s2:#f08a4b;--s3:#a597ff;--s4:#93a0ad;--band:rgba(63,192,173,.18);color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1316;--card:#171c20;--ink:#e6e9ec;--mut:#9aa4ae;--line:#283037;--acc:#3fc0ad;--acc2:#16332e;--up:#47c47c;--dn:#f0675b;--warn:#e3a33f;--warn2:#3a2c14;--crit2:#3c1c19;--chip:#232a30;
+ --s1:#3fc0ad;--s2:#f08a4b;--s3:#a597ff;--s4:#93a0ad;--band:rgba(63,192,173,.18);color-scheme:dark}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 "IBM Plex Sans",system-ui,sans-serif}
-.w{max-width:1320px;margin:0 auto;padding-inline:16px;padding-block:14px 40px}
-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 16px;margin-bottom:10px}h1{font-size:20px;margin:0;font-weight:600}
-.mut{color:var(--mut)}.num,td,.k b{font-variant-numeric:tabular-nums}
-nav{display:flex;gap:4px;flex-wrap:wrap;position:sticky;top:env(safe-area-inset-top,0px);background:var(--bg);padding:6px 0;z-index:5;border-bottom:1px solid var(--line);margin-bottom:12px}
-nav button{border:1px solid var(--line);background:var(--card);color:var(--ink);border-radius:6px;padding:6px 11px;font:inherit;cursor:pointer}
-nav button.on{background:var(--acc);border-color:var(--acc);color:#fff}
-.kp{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
-.k{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:9px 11px}.k span{display:block;color:var(--mut);font-size:12px}.k b{font-size:19px;font-weight:600}.k i{display:block;font-style:normal;color:var(--mut);font-size:12px}
-section{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-bottom:12px;min-width:0}
-h2{font-size:15px;margin:0 0 8px;font-weight:600}h3{font-size:13px;margin:10px 0 6px;font-weight:600}
+.w{max-width:1360px;margin:0 auto;padding-inline:16px;padding-block:12px 48px}
+.top{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin-bottom:6px}.top h1{font-size:19px;margin:0;font-weight:600}
+.top select{font:inherit;font-weight:600;font-size:15px;padding:6px 10px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--ink);max-width:100%}
+.mut{color:var(--mut)}.nota{font-size:12px;color:var(--mut);margin:6px 0 0}td,.kv b,.num{font-variant-numeric:tabular-nums}
+.aviso{background:var(--warn2);color:var(--warn);border-radius:6px;padding:6px 10px;font-size:13px;margin:6px 0}
+nav{display:flex;gap:2px;flex-wrap:wrap;position:sticky;top:env(safe-area-inset-top,0px);z-index:9;background:var(--bg);border-bottom:1px solid var(--line);margin-bottom:12px}
+nav button{border:0;border-bottom:2px solid transparent;background:none;color:var(--mut);padding:9px 12px;font:inherit;font-weight:500;cursor:pointer}
+nav button.on{color:var(--ink);border-bottom-color:var(--acc)}
+.kp{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:12px}
+.kv{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:10px 12px}.kv span{display:block;color:var(--mut);font-size:12px}.kv b{display:block;font-size:20px;font-weight:600;margin:2px 0}.kv i{font-style:normal;font-size:12px;color:var(--mut)}
+section{background:var(--card);border:1px solid var(--line);border-radius:9px;padding:12px 14px;margin-bottom:12px;min-width:0}
+h2{font-size:15px;margin:0 0 4px;font-weight:600}.sub{font-size:12px;color:var(--mut);margin:0 0 8px}h3{font-size:13px;margin:12px 0 6px;font-weight:600}
 .g2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:12px}.g3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
-@media(max-width:900px){.g2,.g3{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:920px){.g2,.g3{grid-template-columns:minmax(0,1fr)}}
 .sc{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:13px}th,td{padding:5px 7px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
-th{color:var(--mut);font-weight:500;cursor:pointer;position:sticky;top:0;background:var(--card)}th.l,td.l{text-align:left}td.wrap{white-space:normal;min-width:240px}
-tr.cl{cursor:pointer}tr.cl:hover td{background:var(--chip)}tr.sel td{background:var(--acc2)}
-.pos{color:var(--ok)}.neg{color:var(--crit)}.chip{display:inline-block;background:var(--chip);border-radius:4px;padding:1px 6px;font-size:12px;margin-right:4px}
-.tag{display:inline-block;border-radius:4px;padding:1px 6px;font-size:12px;font-weight:500}.t-crit{background:var(--crit2);color:var(--crit)}.t-warn{background:var(--warn2);color:var(--warn)}.t-ok{background:var(--acc2);color:var(--acc)}
-.pl{height:290px}.pl.s{height:230px}input,select{font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;max-width:100%}
-.ctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:8px}a{color:var(--acc)}
-.nota{font-size:12px;color:var(--mut);margin:6px 0 0}.vazio{color:var(--mut);font-style:italic}
-ul.ls{list-style:none;padding:0;margin:0}ul.ls li{padding:6px 0;border-bottom:1px solid var(--line)}
+th{color:var(--mut);font-weight:500;font-size:12px;cursor:pointer;position:sticky;top:0;background:var(--card)}th.l,td.l{text-align:left}td.wrap{white-space:normal;min-width:220px}
+tr.cl{cursor:pointer}tr.cl:hover td{background:var(--chip)}
+.up{color:var(--up)}.dn{color:var(--dn)}.tag{display:inline-block;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:600}.t-dn{background:var(--crit2);color:var(--dn)}.t-up{background:var(--acc2);color:var(--acc)}.t-w{background:var(--warn2);color:var(--warn)}
+.pl{height:290px}.pl.s{height:230px}.pl.l{height:360px}.ctl{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px}
+.ctl input,.ctl select{font:inherit;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;max-width:100%}
+.seg button{border:1px solid var(--line);background:var(--card);color:var(--mut);padding:4px 9px;font:inherit;font-size:12px;cursor:pointer}.seg button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.seg button:first-child{border-radius:6px 0 0 6px}.seg button:last-child{border-radius:0 6px 6px 0}
+.vazio{color:var(--mut);font-style:italic}ul.ls{list-style:none;padding:0;margin:0}ul.ls li{padding:6px 0;border-bottom:1px solid var(--line)}a{color:var(--acc)}
+.leia{font-size:13px;line-height:1.5;margin:4px 0 0}.leia b{font-weight:600}
+.bar{display:flex;align-items:center;gap:8px;margin:3px 0}.bar span:first-child{flex:0 0 44%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12.5px}.bar i{display:block;height:12px;border-radius:3px;background:var(--s1)}.bar em{font-style:normal;font-size:12px;color:var(--mut)}
 [hidden]{display:none!important}
 </style>
 <div class="w">
-<header><h1>Vol monitor de crédito</h1><span class="mut" id="ger"></span><button id="tema" style="margin-left:auto" class="chip">tema</button></header>
+<div class="top"><h1>Monitor de crédito</h1><select id="fundo" aria-label="fundo"></select><span class="mut" id="ger"></span><button id="tema" class="seg" style="margin-left:auto;border:1px solid var(--line);background:var(--card);color:var(--mut);border-radius:6px;padding:4px 9px;cursor:pointer">tema</button></div>
+<div id="avisos"></div>
 <nav id="nav"></nav>
-<div id="p_resumo"></div><div id="p_agenda" hidden></div><div id="p_mercado" hidden></div><div id="p_ativos" hidden></div>
-<div id="p_prev" hidden></div><div id="p_risco" hidden></div><div id="p_metodo" hidden></div>
+<div id="t_geral"></div><div id="t_sinais" hidden></div><div id="t_ativos" hidden></div><div id="t_risco" hidden></div><div id="t_agenda" hidden></div><div id="t_mercado" hidden></div>
 </div>
 <script>
 const D=/*DADOS*/;
 const $=s=>document.querySelector(s),css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 const br=(v,c=2)=>v==null||!isFinite(v)?"—":Number(v).toLocaleString("pt-BR",{minimumFractionDigits:c,maximumFractionDigits:c});
-const sg=(v,c=1,u="")=>v==null||!isFinite(v)?"—":`<span class="${v>0?"pos":v<0?"neg":""}">${v>0?"+":""}${br(v,c)}${u}</span>`;
-const sgi=(v,c=1,u="")=>v==null||!isFinite(v)?"—":`<span class="${v>0?"neg":v<0?"pos":""}">${v>0?"+":""}${br(v,c)}${u}</span>`;
-const dt=s=>s?s.slice(8,10)+"/"+s.slice(5,7)+"/"+s.slice(2,4):"—",esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
-const A=D.ativos.filter(a=>a.coberto),E=D.emissores,R=D.risco;
-const lay=(o={})=>Object.assign({margin:{l:48,r:12,t:10,b:34},paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{family:"IBM Plex Sans",size:11,color:css("--ink")},
-  xaxis:{gridcolor:css("--line"),zerolinecolor:css("--line")},yaxis:{gridcolor:css("--line"),zerolinecolor:css("--mut")},showlegend:true,legend:{orientation:"h",y:1.14,x:0}},o);
+const sg=(v,c=1,u="")=>v==null||!isFinite(v)?"—":`<span class="${v>0?"up":v<0?"dn":""}">${v>0?"+":""}${br(v,c)}${u}</span>`;
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const dt=s=>s?s.slice(8,10)+"/"+s.slice(5,7)+"/"+s.slice(2,4):"—";
+const mi=v=>v==null?"—":Math.abs(v)>=1e3?br(v/1e3,2)+" bi":br(v,1)+" mi";
+const lay=(o={})=>Object.assign({margin:{l:46,r:12,t:8,b:32},paper_bgcolor:"rgba(0,0,0,0)",plot_bgcolor:"rgba(0,0,0,0)",font:{family:"IBM Plex Sans",size:11,color:css("--ink")},
+  xaxis:{gridcolor:css("--line"),zerolinecolor:css("--line")},yaxis:{gridcolor:css("--line"),zerolinecolor:css("--mut")},showlegend:true,legend:{orientation:"h",y:1.13,x:0,font:{size:11}},hovermode:"x unified"},o);
 const plot=(id,t,l)=>{if(window.Plotly&&document.getElementById(id))Plotly.react(id,t,lay(l),{displayModeBar:false,responsive:true})};
-function tabela(el,cols,rows,o={}){let k=o.ord||null,dir=-1;const go=()=>{let r=rows.slice();if(k){r.sort((a,b)=>{const x=a[k],y=b[k];return (x==null)-(y==null)||(typeof x=="string"?x.localeCompare(y):(x-y))*dir})}
-  el.innerHTML=`<div class="sc"${o.h?` style="max-height:${o.h}px;overflow:auto"`:""}><table><tr>${cols.map(c=>`<th class="${c[2]||""}" data-k="${c[0]}">${c[1]}</th>`).join("")}</tr>${r.map((x,i)=>`<tr class="${o.click?"cl":""}" data-i="${rows.indexOf(x)}">${cols.map(c=>`<td class="${c[2]||""}">${c[3]?c[3](x[c[0]],x):esc(x[c[0]]??"—")}</td>`).join("")}</tr>`).join("")}</table></div>`;
-  el.querySelectorAll("th").forEach(th=>th.onclick=()=>{dir=k==th.dataset.k?-dir:-1;k=th.dataset.k;go()});
-  if(o.click)el.querySelectorAll("tr.cl").forEach(tr=>tr.onclick=()=>o.click(rows[+tr.dataset.i],tr))};go()}
-// ------------------------------------------------------------ navegação
-const ABAS=[["resumo","Hoje"],["agenda","O que vem"],["mercado","Mercado e notícias"],["ativos","Ativos"],["prev","O que antecipa"],["risco","Risco"],["metodo","Como é calculado"]];
-function aba(id){ABAS.forEach(([k])=>{$("#p_"+k).hidden=k!=id;$(`#nav [data-a="${k}"]`).classList.toggle("on",k==id)});try{localStorage.setItem("vm_aba",id)}catch(e){};
-  if(window.Plotly)setTimeout(()=>document.querySelectorAll(`#p_${id} .js-plotly-plot`).forEach(g=>Plotly.Plots.resize(g)),30)}
-$("#nav").innerHTML=ABAS.map(([k,t])=>`<button data-a="${k}">${t}</button>`).join("");$("#nav").onclick=e=>{if(e.target.dataset.a)aba(e.target.dataset.a)};
+function tabela(el,cols,rows,o={}){let k=o.ord||null,dir=o.asc?1:-1;const go=()=>{let r=rows.slice();if(k)r.sort((a,b)=>{const x=a[k],y=b[k];return (x==null)-(y==null)||(typeof x=="string"?x.localeCompare(y):(x-y))*dir});
+  el.innerHTML=`<div class="sc"${o.h?` style="max-height:${o.h}px;overflow:auto"`:""}><table><tr>${cols.map(c=>`<th class="${c[2]||""}" data-k="${c[0]}">${c[1]}</th>`).join("")}</tr>${r.map(x=>`<tr class="${o.click?"cl":""}" data-i="${rows.indexOf(x)}">${cols.map(c=>`<td class="${c[2]||""}">${c[3]?c[3](x[c[0]],x):esc(x[c[0]]??"—")}</td>`).join("")}</tr>`).join("")}</table></div>`;
+  el.querySelectorAll("th").forEach(th=>th.onclick=()=>{dir=k==th.dataset.k?-dir:-1;k=th.dataset.k;go()});if(o.click)el.querySelectorAll("tr.cl").forEach(tr=>tr.onclick=()=>o.click(rows[+tr.dataset.i]))};go()}
+const barras=(el,obj,u="%",n=12)=>{const e=Object.entries(obj||{}).filter(([,v])=>v!=null).slice(0,n),m=Math.max(...e.map(([,v])=>Math.abs(v)),1e-9);
+  el.innerHTML=e.length?e.map(([k,v])=>`<div class="bar"><span title="${esc(k)}">${esc(k)}</span><i style="width:${Math.max(2,Math.abs(v)/m*46)}%;${v<0?"background:var(--s2)":""}"></i><em>${br(v,1)}${u}</em></div>`).join(""):'<p class="vazio">—</p>'};
+// ---------------------------------------------------------------- estado
+const F=D.fundos,AT=D.ativos,E=D.emissores,RD=D.regras_dias;
+let FS=null,SEL=null;
+const ABAS=[["geral","Visão geral"],["sinais","Sinais"],["ativos","Ativos"],["risco","Risco"],["agenda","Agenda"],["mercado","Mercado"]];
+$("#nav").innerHTML=ABAS.map(([k,t])=>`<button data-a="${k}">${t}</button>`).join("");
+function aba(id){ABAS.forEach(([k])=>{$("#t_"+k).hidden=k!=id;$(`#nav [data-a="${k}"]`).classList.toggle("on",k==id)});try{localStorage.setItem("mc_aba",id)}catch(e){}
+  if(window.Plotly)setTimeout(()=>document.querySelectorAll(`#t_${id} .js-plotly-plot`).forEach(g=>Plotly.Plots.resize(g)),40)}
+$("#nav").onclick=e=>{if(e.target.dataset.a)aba(e.target.dataset.a)};
+$("#fundo").innerHTML=F.map((f,i)=>`<option value="${i}">${esc(f.nome)}${f.credito_pct<5?" (pouco crédito)":""}</option>`).join("");
+$("#fundo").onchange=()=>{FS=F[+$("#fundo").value];SEL=null;try{localStorage.setItem("mc_fundo",FS.id)}catch(e){};tudo()};
 $("#tema").onclick=()=>{const r=document.documentElement,d=r.dataset.theme=="dark"||(!r.dataset.theme&&matchMedia("(prefers-color-scheme:dark)").matches);r.dataset.theme=d?"light":"dark";tudo()};
-$("#ger").textContent=`atualizado ${D.gerado} · ${A.length} ativos com código, ${br(R.pl_codigo,1)}% do PL`;
-// ------------------------------------------------------------ hoje
-function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio_marcacao");
-  const pnl=k=>A.reduce((s,a)=>s+(a[k]!=null?a[k]*a.perc_nav/100:0),0);
-  $("#p_resumo").innerHTML=`<div class="kp">
-   <div class="k"><span>Vol anual (cobertos)</span><b>${br(R.vol,2)}%</b><i>sem diversificação ${br(R.vol_sem_div,2)}%</i></div>
-   <div class="k"><span>VaR 95% 1 dia</span><b>${br(R.var95_1d,3)}%</b><i>1 mês ${br(R.var95_1m,2)}% do PL</i></div>
-   <div class="k"><span>Backtest VaR (250 d)</span><b>${br(bt.violacoes,1)}%</b><i>esperado 5% · real ${br(bt.vol_real,2)}% vs modelo ${br(bt.vol_modelo,2)}%</i></div>
-   <div class="k"><span>Duration média</span><b>${br(R.duration,2)}</b><i>+100 bps na taxa: ${br(R.dv01,2)}% do PL</i></div>
-   <div class="k"><span>PnL 12m: carrego</span><b>${br(pnl("pnl_car")/100,2)}%</b><i>do PL, ativos com série oficial</i></div>
-   <div class="k"><span>PnL 12m: taxa indicativa</span><b>${sg(pnl("pnl_mtm")/100,2,"%")}</b><i>resíduo ${br(pnl("pnl_res")/100,2)}%</i></div></div>
-  <section><h2>Previsão da marcação ANBIMA de hoje</h2><div id="ph"></div></section>
-  <section><h2>Sinais de 1 a 20 dias úteis (regras testadas)</h2><div id="rd"></div></section>
-  <section><h2>Próximos 5 dias úteis: onde o % do PU par deve estar</h2><div id="p5"></div></section>
-  <section><h2>O que olhar agora</h2><div id="sin"></div><p class="nota">Ordenado pelo impacto estimado em bps do PL e pelo peso. Impacto só aparece quando o sinal é estatisticamente útil (aba "O que antecipa").</p></section>
-  <div class="g2"><section><h2>Mercado de crédito hoje</h2><div id="r_idx"></div></section><section><h2>Ativos que mais andaram em 1 mês (taxa indicativa)</h2><div id="r_mov"></div></section></div>`;
-  const PH=A.filter(a=>a.prev_hoje).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,...a.prev_hoje,txt:Object.entries(a.prev_hoje.comp).map(([k,c])=>`${k}: ${sg(c.bps,1)} (${esc(c.txt)})`).join("<br>")}));
-  const tot=PH.reduce((s,p)=>s+p.impacto_pl,0);
-  $("#ph").innerHTML=`<p>Esperado para o fundo: <b>${sg(tot,2," bps do PL")}</b> na marcação de hoje (ANBIMA de ${dt(D.data_ref)} → hoje), ${PH.length} ativos com sinal.${D.mercado_hoje&&Object.keys(D.mercado_hoje).length?" Tom do mercado: "+Object.entries(D.mercado_hoje).map(([k,v])=>`${k} ${sg(v,0," bps")}`).join(", "):""}</p><div id="ph_t"></div>
-   <p class="nota">bps de % do PU par (positivo = PU sobe). Δ taxa ≈ −% par / duration modificada. Regras do estudo intradiário (aba "O que antecipa"): negócio do papel conta pelo volume (≥ R$ 20 mi: a ANBIMA anda 39% do gap, acerto 82%); papel IPCA anda com o DAP; ação ≥ 2% no dia.</p>`;
-  PH.length?tabela($("#ph_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["total","% par (bps)","",v=>sg(v,1)],["dtaxa","Δ taxa (bps)","",v=>sgi(v,1)],["impacto_pl","Impacto (bps PL)","",v=>sg(v,2)],["perc","% PL","",v=>br(v,2)],["txt","Por quê","l wrap",v=>v]],
-    PH.sort((a,b)=>Math.abs(b.impacto_pl)-Math.abs(a.impacto_pl)),{h:380}):$("#ph_t").innerHTML='<p class="vazio">Sem negócios relevantes, juros ou ações fora do normal até agora.</p>';
-  const RD=D.regras_dias||{},RA=A.filter(a=>a.regras_dias).flatMap(a=>a.regras_dias.map(r=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,...r,R:RD[r.regra]})));
-  const cel=(R,h)=>{const x=R.h[h];return x?`${sg(x.mediana,0)} <span class="mut">(${sg(x.p10,0)} a ${sg(x.p90,0)})</span><br><b>${br(x.acerto,0)}%</b> <span class="mut">vs ${br(x.base,0)}%</span>`:"—"};
-  $("#rd").innerHTML=`<p>Situações em que o histórico mostra o sentido do % do PU par com ~70–80% de acerto (base ~50%). Cada célula: mediana do movimento em bps (faixa 10–90% do que aconteceu) e acerto do sentido vs a base.</p><div id="rd_t"></div>
-   <p class="nota">Estudo nas 100 debêntures mais líquidas, 04/2023–10/2026, ${Object.keys(RD).length} regras estáveis em 2023-24 e em 2025-26. Por quê: a ANBIMA ajusta o spread de papéis DI+ em etapas (a marcação tem inércia depois de um choque) e acompanha negócios grandes ao longo de dias; em IPCA, quedas extremas da semana devolvem. Fundos (resgates × posições, CDA), notícias e o restante testado não tiveram poder.</p>`;
-  RA.length?tabela($("#rd_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,22))],["nome","Situação","l wrap",(v,x)=>`${esc(v)}${x.gap!=null&&x.regra=="di_negocio"?` (gap ${sg(x.gap,0)})`:""} <span class="mut">${esc(x.R.alvo)}</span>`],
-    ["h1","1 dia","",(v,x)=>cel(x.R,1)],["h5","5 dias","",(v,x)=>cel(x.R,5)],["h10","10 dias","",(v,x)=>cel(x.R,10)],["h20","20 dias","",(v,x)=>cel(x.R,20)],
-    ["imp","Impacto 10d (bps PL)","",(v,x)=>x.R.h[10]?sg(x.R.h[10].mediana*x.perc/100,2):"—"],["perc","% PL","",v=>br(v,2)]],RA,{h:420}):$("#rd_t").innerHTML='<p class="vazio">Nenhum papel da carteira está numa dessas situações hoje.</p>';
-  const P5=A.filter(a=>a.prev5).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,par:a.pct_par,...a.prev5,dur:a.duration,
-     porq:a.prev5.porque.map(x=>`${esc(x.f)} ${sg(x.bps,1)}`).join(" · ")}));
-  const I5=D.info5||{};
-  $("#p5").innerHTML=P5.length?`<p>Faixa de 80% para o % do PU par daqui a 5 dias úteis (8%–92%) e o centro esperado do papel contra o mercado. <span class="tag t-crit">queda</span> / <span class="tag t-ok">alta</span> = 10% mais fracos/fortes do universo hoje (${I5.n_univ_hoje||"—"} papéis): historicamente ${D.estudo5.decis[0][1]} e +${D.estudo5.decis[6][1]} bps em 5 dias, ${D.estudo5.decis[0][2]}% e ${D.estudo5.decis[6][2]}% de alta.</p><div id="p5_t"></div>
-   <p class="nota">Modelo treinado hoje com ${I5.papeis||"—"} papéis (até ${dt(I5.ate)}); intervalo calibrado em ${esc(I5.calibracao||"")} (cobertura ${br(I5.cobertura_cal,0)}%). Teste fora da amostra: cobertura ${D.estudo5.cobertura}%, IC ${br(D.estudo5.ic,3)} (t ${br(D.estudo5.ic_t,1)}). O centro é pequeno de propósito: em 5 dias a maior parte do movimento é ruído; a faixa é o que mais importa.</p>`:'<p class="vazio">sem previsão (instale lightgbm)</p>';
-  if(P5.length)tabela($("#p5_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,24))],["par","% par hoje","",v=>br(v,2)],["mu","Centro (bps)","",v=>sg(v,1)],
-    ["q08","Faixa (bps)","",(v,x)=>`${sg(x.q08,0)} a ${sg(x.q92,0)}`],["q92","Faixa em taxa (bps)","",(v,x)=>`${sgi(-x.q92/Math.max(x.dur||1,.3),0)} a ${sgi(-x.q08/Math.max(x.dur||1,.3),0)}`],
-    ["pct_univ","Posição no universo","",(v,x)=>`${br(v,0)}%${x.sinal?` <span class="tag ${x.sinal=="queda"?"t-crit":"t-ok"}">${x.sinal}</span>`:""}`],["porq","Por quê (bps)","l wrap",v=>v],["perc","% PL","",v=>br(v,2)]],P5,{ord:"pct_univ",h:380});
-  const S=D.sinais.map(s=>({...s,imp:s.impacto_bps_pl}));
-  const cls=t=>/Fato|Recupera|Dado/.test(t)?"t-crit":/Negócio|Ação/.test(t)?"t-warn":"t-ok";
-  S.length?tabela($("#sin"),[["tipo","Tipo","l",v=>`<span class="tag ${cls(v)}">${esc(v)}</span>`],["ativo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,32))],["quando","Quando","l",v=>/\d{4}-/.test(v)?dt(v):esc(v)],
-    ["texto","O que","l wrap",(v,s)=>s.link?`<a href="${esc(s.link)}" target="_blank" rel="noopener">${esc(v)}</a>`:esc(v)],["imp","Impacto (bps PL)","",v=>sg(v,1)],["peso","% PL","",v=>br(v,2)]],S,{h:460}):$("#sin").innerHTML='<p class="vazio">Nada fora do normal agora.</p>';
-  const I=Object.entries(D.indices).filter(([k])=>/IDA|JGP|IMA|IRF/.test(k)).map(([k,v])=>({k,...v}));
-  tabela($("#r_idx"),[["k","Índice","l"],["data","Data","",dt],["d1","Dia","",v=>sg(v,3,"%")],["z","Dia em desvios","",v=>sg(v,1)],["m1","1 mês","",v=>sg(v,2,"%")],["a12","12 meses","",v=>sg(v,2,"%")]],I);
-  const M=A.filter(a=>a.dtaxa_1m!=null).sort((a,b)=>Math.abs(b.dtaxa_1m)-Math.abs(a.dtaxa_1m)).slice(0,12);
-  tabela($("#r_mov"),[["codigo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,28))],["taxa","Taxa","",v=>br(v,2)],["dtaxa_1m","Δ 1m (bps)","",v=>sgi(v,0)],["ret_1m","Retorno 1m","",v=>sg(v,2,"%")],["perc_nav","% PL","",v=>br(v,2)]],M,{click:a=>{aba("ativos");detalhe(a)}})}
-// ------------------------------------------------------------ agenda
-function agenda(){$("#p_agenda").innerHTML=`<section><h2>Próximos eventos</h2><div class="ctl"><select id="ag_f"><option value="">tudo</option><option>Resultado</option><option>Juros</option><option>Amortiza</option><option>Vencimento</option><option>IPCA</option></select></div><div id="ag_t"></div>
-  <p class="nota">Juros/amortização/vencimento: agenda pública da ANBIMA. Resultado: data estimada pela mediana dos atrasos de entrega da companhia à CVM no mesmo trimestre (entre o mais cedo e o mais tarde já vistos). Pagamento não é perda: o PU cai e o caixa entra.</p></section>
-  <section><h2>Expectativas (Focus)</h2><div id="ag_fo"></div></section>`;
-  const f=()=>{const q=$("#ag_f").value;tabela($("#ag_t"),[["data","Data","l",dt],["evento","Evento","l"],["pct","%","l"],["ativo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,34))],["peso","% PL","",v=>br(v,2)]],
-    D.agenda.filter(a=>!q||(a.evento||"").includes(q)||a.ativo==q),{h:620})};$("#ag_f").onchange=f;f();
-  const F=D.focus||{};$("#ag_fo").innerHTML=Object.entries(F).map(([k,v])=>`<span class="chip">${k} (${dt(v.data)}): ${Object.entries(v.anos).sort().map(([a,m])=>`${a} ${br(m,2)}%`).join(" · ")}</span>`).join(" ")||'<p class="vazio">indisponível</p>'}
-// ------------------------------------------------------------ mercado
-function mercado(){$("#p_mercado").innerHTML=`<div class="g2"><section><h2>Ativos de referência</h2><div id="mk_t"></div><p class="nota">Dia em desvios = variação do dia / desvio diário de 1 ano. |z| ≥ 2 é dia anormal.</p></section>
-  <section><h2>Juros futuros (B3, ~15 min)</h2><div id="mk_j"></div><h3>Tesouro Direto (histórico)</h3><div id="mk_td" class="pl s"></div></section></div>
-  <div class="g2"><section><h2>Índices de crédito (base 100 em 12 meses)</h2><div id="mk_ic" class="pl"></div><p class="nota">IDA (ANBIMA) e JGP, via SmartWealth.</p></section><section><h2>Fatos relevantes e comunicados (60 dias)</h2><div id="mk_doc" style="max-height:330px;overflow:auto"></div></section></div>
-  <section><h2>Notícias dos maiores emissores (14 dias)</h2><div id="mk_n" class="g3"></div></section>`;
-  const M=Object.entries(D.mercado).map(([k,v])=>({k,...v}));
-  tabela($("#mk_t"),[["k","","l"],["preco","Último","",v=>br(v,2)],["d1","Dia","",v=>sg(v,2,"%")],["z","Desvios","",v=>sg(v,1)],["m1","1 mês","",v=>sg(v,1,"%")]],M);
-  const J=D.juros||{};$("#mk_j").innerHTML=Object.keys(J).length?`<div class="sc"><table><tr><th class="l">Prazo</th>${Object.keys(J).map(k=>`<th>${k}</th><th>Δ bps</th>`).join("")}</tr>${(J.DI1||J.DAP||[]).map((_,i)=>`<tr><td class="l">${(J.DI1||J.DAP)[i].prazo}</td>${Object.values(J).map(L=>L[i]?`<td>${br(L[i].taxa,2)}</td><td>${sgi(L[i].bps,1)}</td>`:"<td></td><td></td>").join("")}</tr>`).join("")}</table></div>`:'<p class="vazio">indisponível agora</p>';
-  plot("mk_td",Object.entries(D.tesouro).map(([k,v],i)=>({x:v.d,y:v.v,name:k,mode:"lines",line:{color:css(i?"--s2":"--s1"),width:1.6}})),{yaxis:{title:{text:"% a.a."},gridcolor:css("--line")}});
-  plot("mk_ic",Object.entries(D.indices).filter(([k])=>/IDA|JGP/.test(k)).map(([k,v],i)=>{const n=v.d.findIndex(d=>d>=v.d[v.d.length-1].replace(/^(\d{4})/,y=>y-1));const b=v.v[Math.max(n,0)];
-    return{x:v.d.slice(Math.max(n,0)),y:v.v.slice(Math.max(n,0)).map(q=>q/b*100),name:k,mode:"lines",line:{width:1.5}}}),{yaxis:{gridcolor:css("--line")}});
-  const docs=Object.values(E).flatMap(e=>(e.docs||[]).map(d=>({...d,emp:e.nome,perc:e.perc}))).sort((a,b)=>b.data.localeCompare(a.data));
-  $("#mk_doc").innerHTML=docs.length?`<ul class="ls">${docs.slice(0,60).map(d=>`<li><span class="tag ${/Fato|Recupera/.test(d.cat)?"t-crit":"t-ok"}">${esc(d.cat)}</span> <span class="mut">${dt(d.data)} · ${esc(d.emp.slice(0,30))} · ${br(d.perc,2)}% PL</span><br>${d.link?`<a href="${esc(d.link)}" target="_blank" rel="noopener">${esc(d.assunto||"documento")}</a>`:esc(d.assunto)}</li>`).join("")}</ul>`:'<p class="vazio">nenhum</p>';
-  $("#mk_n").innerHTML=Object.entries(D.noticias).map(([r,n])=>`<div><h3>${esc((E[r]||{}).nome||n.busca)} <span class="mut">${br((E[r]||{}).perc,2)}% PL</span></h3><ul class="ls">${n.itens.map(i=>`<li>${i.alerta.length?`<span class="tag t-crit">${esc(i.alerta[0])}</span> `:""}<a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.titulo)}</a> <span class="mut">${dt(i.data)} ${esc(i.fonte)}</span></li>`).join("")}</ul></div>`).join("")||'<p class="vazio">sem notícias</p>'}
-// ------------------------------------------------------------ ativos
-let SEL=null;
-function ativos(){$("#p_ativos").innerHTML=`<section><h2>Carteira</h2><div class="ctl"><input id="busca" placeholder="buscar código ou emissor" aria-label="buscar"><span class="mut">clique num ativo para ver curvas, PnL, fundamentos e ação</span></div><div id="at_t"></div></section><div id="det"></div>`;
-  const C=[["codigo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,30))],["idx","Índice","l"],["perc_nav","% PL","",v=>br(v,2)],["taxa","Taxa ind.","",v=>br(v,2)],["pct_par","% PU par","",v=>br(v,2)],
-   ["duration","Duration","",v=>br(v,2)],["vol","Vol 12m","",v=>br(v,2)],["fonte","Fonte da vol","l"],["contrib_pct","% do risco","",v=>br(v,1)],["dtaxa_1m","Δ taxa 1m (bps)","",v=>sgi(v,0)],
-   ["pnl_car","Carrego 12m (bps)","",v=>br(v,0)],["pnl_mtm","Taxa 12m (bps)","",v=>sg(v,0)],["pnl_res","Resíduo 12m (bps)","",v=>sg(v,0)],["giro_30d","Giro B3 30d (R$ mi)","",v=>br(v,1)]];
-  const f=()=>{const q=$("#busca").value.toUpperCase();tabela($("#at_t"),C,A.filter(a=>!q||(a.codigo+" "+(a.emissor||"")).toUpperCase().includes(q)),{ord:"perc_nav",h:520,click:(a)=>detalhe(a)})};$("#busca").oninput=f;f();
-  if(SEL)detalhe(SEL)}
-function detalhe(a){SEL=a;const e=E[a.raiz]||{},h=a.hist||{d:[]};const ac=e.acao_credito,fu=e.fund;
-  $("#det").innerHTML=`<section><h2>${esc(a.codigo)} · ${esc(a.emissor||"")} <span class="mut">${esc(a.indexador||"")} · cupom ${br(a.cupom,2)} · venc. ${dt(a.venc)} · ${br(a.perc_nav,2)}% PL</span></h2>
-   ${a.lastro?`<p><span class="tag t-warn">${esc(a.lastro)}</span></p>`:""}
-   <div class="kp"><div class="k"><span>Taxa indicativa</span><b>${br(a.taxa,2)}%</b><i>${dt(a.data_taxa)}</i></div><div class="k"><span>% PU par</span><b>${br(a.pct_par,2)}%</b><i>PU ${br(a.pu,2)}</i></div>
-    <div class="k"><span>Vol 12m</span><b>${br(a.vol,2)}%</b><i>${esc(a.fonte||"")}</i></div><div class="k"><span>PnL 12m (bps do PU)</span><b>${br(a.pnl_total,0)}</b><i>carrego ${br(a.pnl_car,0)} · taxa ${br(a.pnl_mtm,0)} · resíduo ${br(a.pnl_res,0)}</i></div>
-    ${a.hoje?`<div class="k"><span>Hoje (B3)</span><b>${sgi(a.hoje.bps,0," bps")}</b><i>${br(a.hoje.taxa,2)}% · R$ ${br(a.hoje.vol,1)} mi${a.hoje.varejo?" · varejo":""}</i></div>`:""}
-    ${e.alav!=null?`<div class="k"><span>Dívida líq./EBITDA</span><b>${br(e.alav,2)}x</b><i>há 1 ano ${br(e.alav_ant,2)}x · cobertura ${br(e.cob,1)}x</i></div>`:""}</div>
-   <div class="g2"><div><h3>Taxa indicativa (cheia = ANBIMA, pontilhada = implícita no PU oficial; pontos = negócios B3; ▲ resultado, ◆ fato relevante)</h3><div id="dt_t" class="pl"></div></div>
-    <div><h3>PnL acumulado contra a taxa indicativa (bps do PU)</h3><div id="dt_p" class="pl"></div></div></div>
-   <div class="g2"><div><h3>% do PU par — 4 meses e a faixa de 80% para os próximos 5 dias úteis</h3><div id="dt_par" class="pl s"></div></div><div><h3>Ação ${ac?esc(e.acao.ticker)+" ("+esc(e.acao.via)+")":""} × taxa (semanal)</h3>${ac?`<div id="dt_ac" class="pl s"></div>`:`<p class="vazio">${e.acao?"série curta para comparar":"emissor sem ação listada"}</p>`}</div></div>
-   ${ac?`<div class="g2"><div><h3>Quem anda primeiro? Correlação ação × Δ taxa por defasagem (barras = intervalo de 95%)</h3><div id="dt_lag" class="pl s"></div><p class="nota">+k: a ação anda k semanas antes da taxa. Correlação de postos (Spearman): negativa = ação cai, taxa sobe. n=${ac.n} semanas; β contemporâneo ${br(ac.beta,2)} bps por 1% da ação.</p></div>
-     <div><h3>Ação na semana × Δ taxa na semana</h3><div id="dt_sc" class="pl s"></div></div></div>`:""}
-   ${fu?`<h3>Fundamentos (CVM, consolidado; data = trimestre de referência, entregue em ▲)</h3><div class="g2"><div id="dt_f1" class="pl s"></div><div id="dt_ft"></div></div>`:`<p class="vazio">${a.raiz?"emissor sem ITR/DFP na CVM (companhia fechada, securitizadora ou categoria sem demonstrações)":"sem CNPJ do emissor"}</p>`}
-   <div class="g2"><div><h3>Agenda</h3>${(a.agenda||[]).length?`<ul class="ls">${a.agenda.map(g=>`<li>${esc(g.data)} · ${esc(g.evento)} ${esc(g.pct)}</li>`).join("")}</ul>`:'<p class="vazio">sem eventos previstos em 6 meses</p>'}${e.prox_resultado?`<p>Próximo resultado (${e.prox_resultado.ref.slice(5,7)}/${e.prox_resultado.ref.slice(0,4)}): ~${dt(e.prox_resultado.esperado)}, entre ${dt(e.prox_resultado.min)} e ${dt(e.prox_resultado.max)}</p>`:""}</div>
-    <div><h3>Documentos CVM (60 dias)</h3>${(e.docs||[]).length?`<ul class="ls">${e.docs.map(d=>`<li><span class="mut">${dt(d.data)} ${esc(d.cat)}</span> ${d.link?`<a href="${esc(d.link)}" target="_blank" rel="noopener">${esc(d.assunto||"documento")}</a>`:esc(d.assunto)}</li>`).join("")}</ul>`:'<p class="vazio">nenhum</p>'}</div></div></section>`;
-  const T=h.tA||[],tc=h.tc||[];
-  const mk=(dts,ys,sym,cor,nome)=>({x:dts,y:ys,mode:"markers",name:nome,marker:{symbol:sym,size:9,color:css(cor)},hovertemplate:"%{x|%d/%m/%y}<extra>"+nome+"</extra>"});
-  const em=(lista)=>{const o=[],p=[];(lista||[]).forEach(d=>{const i=h.d.findIndex(x=>x>=d);if(i>=0){o.push(h.d[i]);p.push(T[i])}});return[o,p]};
-  const [rx,ry]=em((fu?fu.entrega:[]).filter(Boolean)),[fx,fy]=em(e.fr_datas);
-  plot("dt_t",[{x:h.d,y:T.map((v,i)=>tc[i]===1?v:null),name:"implícita",mode:"lines",line:{color:css("--s1"),dash:"dot",width:1.4}},{x:h.d,y:T.map((v,i)=>tc[i]===0?v:null),name:"ANBIMA",mode:"lines",line:{color:css("--s1"),width:2}},
-    {x:(h.neg||{}).d,y:(h.neg||{}).t,mode:"markers",name:"negócios",marker:{size:(h.neg||{v:[]}).v.map(v=>4+Math.sqrt(v)*2),color:css("--s2"),opacity:.5}},mk(rx,ry,"triangle-up","--s3","resultado"),mk(fx,fy,"diamond","--crit","fato relevante")],{yaxis:{title:{text:"% a.a."},gridcolor:css("--line")}});
+$("#ger").textContent=`atualizado ${D.gerado}`;
+const A=c=>AT[c]||{};
+const dmod=a=>["IPCA","PRE","IGPM"].includes(a.idx)?(a.duration||1)/(1+(a.taxa||0)/100):(a.duration||1);
+const sgt=(v,c=0)=>v==null||!isFinite(v)?"—":`<span class="${v>0?"dn":v<0?"up":""}">${v>0?"+":""}${br(v,c)}</span>`;
+const pf=c=>FS.pesos[c]||0;
+// projeção de um ativo: mediana e faixa 10–90% em bps de % do PU par para 0,1,5,10,20 dias úteis
+function proj(a){const sd=(a.vol||0)/Math.sqrt(252)*100,hs=[0,1,5,10,20],rg=(a.regras_dias||[])[0],R=rg?RD[rg.regra]:null;
+  return hs.map(h=>{if(!h)return{h,med:0,lo:0,hi:0,fonte:""};let med=0,lo=-1.2816*sd*Math.sqrt(h),hi=-lo,fonte="vol do papel";
+    if(a.prev5){const k=Math.sqrt(h/5),c=a.prev5.mu*Math.min(h,5)/5;med=c;lo=c+(a.prev5.q08-a.prev5.mu)*k;hi=c+(a.prev5.q92-a.prev5.mu)*k;fonte="modelo 5 dias"}
+    if(R&&R.h[h]){med=R.h[h].mediana;lo=R.h[h].p10;hi=R.h[h].p90;fonte="regra: "+R.nome}
+    if(h==1&&a.prev_hoje){med+=a.prev_hoje.total;lo+=a.prev_hoje.total;hi+=a.prev_hoje.total;fonte+=" + negócios de hoje"}
+    return{h,med,lo,hi,fonte}})}
+const diasUteis=(d0,n)=>{const d=new Date(d0+"T12:00:00");let k=0;while(k<n){d.setDate(d.getDate()+1);if(d.getDay()%6)k++}return d.toISOString().slice(0,10)};
+// ---------------------------------------------------------------- visão geral
+function geral(){const f=FS,c=f.carrego||{},s=f.sens||{},r=f.risco||{},p=f.perf||{},fl=f.fluxo||{},h=f.hoje||{};
+  const pl=f.pl||0,cr=(f.credito_pct||0)>=1;
+  if(!cr){$("#t_geral").innerHTML=`<div class="kp"><div class="kv"><span>Patrimônio</span><b>R$ ${mi(pl)}</b><i>${f.cotistas?br(f.cotistas,0)+" cotistas · ":""}fluxo 20 dias ${sg(fl[20],2,"% do PL")}</i></div>
+     <div class="kv"><span>Retorno 12 meses</span><b>${p["12m"]?br(p["12m"].pct_cdi,0)+"% do CDI":"—"}</b><i>${p["12m"]?br(p["12m"].fundo,2)+"% vs CDI "+br(p["12m"].cdi,2)+"%":""}</i></div>
+     <div class="kv"><span>Retorno no mês / no ano</span><b>${p.mes?br(p.mes.pct_cdi,0)+"% do CDI":"—"}</b><i>ano ${p.ano?br(p.ano.pct_cdi,0)+"% do CDI":"—"}</i></div></div>
+    <div class="g2"><section><h2>Retorno do fundo × CDI (12 meses)</h2><div id="g_cota" class="pl"></div></section><section><h2>Alocação (CVM)</h2><div id="g_aloc"></div></section></div>
+    <section><h2>Captação líquida (6 meses, R$ mi por dia)</h2><div id="g_fl" class="pl s"></div></section>`;
+   const cs=f.cota_serie;if(cs)plot("g_cota",[{x:cs.d,y:cs.fundo,name:f.nome,mode:"lines",line:{color:css("--s1"),width:2}},{x:cs.d,y:cs.cdi,name:"CDI",mode:"lines",line:{color:css("--s4"),dash:"dot"}}],{yaxis:{gridcolor:css("--line")}});
+   barras($("#g_aloc"),f.aloc_cat);const fs=f.fluxo_serie;if(fs)plot("g_fl",[{type:"bar",x:fs.d,y:fs.v,marker:{color:fs.v.map(v=>v<0?css("--s2"):css("--s1"))}}],{showlegend:false,yaxis:{gridcolor:css("--line")}});return}
+  $("#t_geral").innerHTML=`<div class="kp">
+   <div class="kv"><span>Patrimônio</span><b>R$ ${mi(pl)}</b><i>${f.cotistas?br(f.cotistas,0)+" cotistas · ":""}fluxo 20 dias ${sg(fl[20],2,"% do PL")}</i></div>
+   <div class="kv"><span>Retorno 12 meses</span><b>${p["12m"]?br(p["12m"].pct_cdi,0)+"% do CDI":"—"}</b><i>${p["12m"]?br(p["12m"].fundo,2)+"% vs CDI "+br(p["12m"].cdi,2)+"%":""} · mês ${p.mes?br(p.mes.pct_cdi,0)+"% CDI":"—"}</i></div>
+   <div class="kv"><span>Carrego da carteira de crédito</span><b>${c.pct_cdi?br(c.pct_cdi,0)+"% do CDI":"—"}</b><i>${c.spread_di!=null?"DI+ "+br(c.spread_di,2)+"%":""}${c.taxa_ipca!=null?" · IPCA+ "+br(c.taxa_ipca,2)+"%":""}</i></div>
+   <div class="kv"><span>Sensibilidade a spread (CS01)</span><b>R$ ${br((s.cs01||0)/1e3,0)} mil/bp</b><i>duration ${br(s.duration_spread,2)} · juro real R$ ${br((s.dv01_ipca||0)/1e3,0)} mil/bp</i></div>
+   <div class="kv"><span>VaR 95% (1 dia / 1 mês)</span><b>R$ ${br((r.var95_1d||0)/100*pl,2)} mi</b><i>1 mês R$ ${br((r.var95_1m||0)/100*pl,1)} mi · vol ${br(r.vol,2)}% a.a.</i></div>
+   <div class="kv"><span>Marcação esperada hoje</span><b>${sg(h.impacto_bps,2," bps")}</b><i>R$ ${br((h.impacto_bps||0)/1e4*pl*1e3,0)} mil · ${h.n||0} ativos com sinal</i></div></div>
+  <div class="g2"><section><h2>Retorno do fundo × CDI (12 meses)</h2><p class="sub">Cota oficial (informe diário CVM), base 100.</p><div id="g_cota" class="pl"></div></section>
+   <section><h2>Próximos dias: retorno esperado contra o carrego</h2><p class="sub">Mediana dos sinais testados (bps do PL) e faixa de 80% pela vol do fundo. A linha tracejada é o carrego acima do CDI.</p><div id="g_proj" class="pl"></div></section></div>
+  <div class="g2"><section><h2>Alocação</h2><div class="ctl seg" id="al_b"></div><div id="g_aloc"></div></section>
+   <section><h2>De onde veio o resultado (12 meses, ativos com marcação ANBIMA)</h2><p class="sub">Carrego (taxa e indexador) × variação da taxa indicativa × resíduo, em bps do PL, com os pesos de hoje.</p><div id="g_pnl" class="pl s"></div></section></div>
+  <div class="g2"><section><h2>Captação líquida (6 meses, R$ mi por dia)</h2><div id="g_fl" class="pl s"></div><p class="nota">5 dias ${sg(fl[5],2,"%")} · 20 dias ${sg(fl[20],2,"%")} · 60 dias ${sg(fl[60],2,"%")} do PL.</p></section>
+   <section><h2>Liquidez da carteira de crédito</h2><p class="sub">Dias para vender cada posição a 20% do volume médio diário da B3 (30 dias).</p><div id="g_liq"></div></section></div>`;
+  const cs=f.cota_serie;if(cs)plot("g_cota",[{x:cs.d,y:cs.fundo,name:f.nome,mode:"lines",line:{color:css("--s1"),width:2}},{x:cs.d,y:cs.cdi,name:"CDI",mode:"lines",line:{color:css("--s4"),dash:"dot"}}],{yaxis:{gridcolor:css("--line")}});
+  else $("#g_cota").innerHTML='<p class="vazio">sem informe diário</p>';
+  const P=f.projecao||[],hs=[0].concat(P.map(x=>x.h));
+  if(P.length&&P[0].lo!=null){const md=[0].concat(P.map(x=>x.sinais)),lo=[0].concat(P.map(x=>x.lo)),hi=[0].concat(P.map(x=>x.hi)),ca=[0].concat(P.map(x=>x.carrego_vs_cdi));
+   plot("g_proj",[{x:hs.concat(hs.slice().reverse()),y:hi.concat(lo.slice().reverse()),fill:"toself",mode:"lines",fillcolor:css("--band"),line:{width:0},name:"faixa de 80%",hoverinfo:"skip"},
+    {x:hs,y:md,name:"mediana dos sinais",mode:"lines+markers",line:{color:css("--s1"),width:2}},{x:hs,y:ca,name:"carrego acima do CDI",mode:"lines",line:{color:css("--s2"),dash:"dash"}}],
+    {xaxis:{title:{text:"dias úteis"},tickvals:hs,gridcolor:css("--line")},yaxis:{title:{text:"bps do PL"},gridcolor:css("--line")},hovermode:"x"})}
+  else $("#g_proj").innerHTML='<p class="vazio">sem ativos com marcação suficiente</p>';
+  const AL={"Categoria":f.aloc_cat,"Indexador":f.aloc_idx,"Emissor (top 15)":f.aloc_emissor,"Setor":f.aloc_setor,"Prazo (duration)":f.aloc_prazo};
+  $("#al_b").innerHTML=Object.keys(AL).map((k,i)=>`<button class="${i?"":"on"}" data-k="${k}">${k}</button>`).join("");
+  barras($("#g_aloc"),AL["Categoria"]);$("#al_b").onclick=e=>{if(!e.target.dataset.k)return;$("#al_b").querySelectorAll("button").forEach(b=>b.classList.toggle("on",b==e.target));barras($("#g_aloc"),AL[e.target.dataset.k])};
+  const ps=f.pnl_serie;if(ps)plot("g_pnl",[["car","carrego","--s1"],["mtm","Δ taxa indicativa","--s2"],["res","resíduo","--s4"]].map(([k,n,c])=>({x:ps.d,y:ps[k],name:n,mode:"lines",line:{color:css(c),width:1.8}})),{yaxis:{title:{text:"bps do PL"},gridcolor:css("--line")}});
+  else $("#g_pnl").innerHTML='<p class="vazio">—</p>';
+  const fs=f.fluxo_serie;if(fs)plot("g_fl",[{type:"bar",x:fs.d,y:fs.v,marker:{color:fs.v.map(v=>v<0?css("--s2"):css("--s1"))},name:"captação líquida"}],{showlegend:false,yaxis:{gridcolor:css("--line")}});
+  barras($("#g_liq"),f.liquidez)}
+// ---------------------------------------------------------------- sinais
+function sinais(){const f=FS,h=f.hoje||{};
+  const cel=(R,hh)=>{const x=R.h[hh];return x?`${sg(x.mediana,0)} <span class="mut">(${br(x.p10,0)} a ${br(x.p90,0)})</span><br><b>${br(x.acerto,0)}%</b> <span class="mut">vs ${br(x.base,0)}%</span>`:"—"};
+  $("#t_sinais").innerHTML=`<section><h2>Hoje: como a marcação ANBIMA deve fechar</h2><p class="sub">Negócios do dia na B3 contra a ANBIMA de ontem, juro real (DAP) nos papéis IPCA, ação do emissor. Impacto esperado: <b>${sg(h.impacto_bps,2," bps do PL")}</b>.</p><div id="s_hoje"></div>
+   <p class="nota">Acerto histórico do sentido no mesmo dia: negócio ≥ R$ 20 mi 82%, R$ 5–20 mi 73%, R$ 1–5 mi 58% (447 papéis, 2023–2026, fora da amostra).</p></section>
+  <section><h2>Próximos 1 a 20 dias: situações com histórico de ~70–80% de acerto</h2><p class="sub">Mediana do movimento do % do PU par (faixa 10–90% do que aconteceu) e acerto do sentido contra a base, nas 100 debêntures mais líquidas, estável em 2023-24 e 2025-26.</p><div id="s_reg"></div></section>
+  <div class="g2"><section><h2>Mais fracos para 5 dias (modelo)</h2><p class="sub">10% piores do universo hoje: historicamente −5 bps contra o mercado e só 46% sobem.</p><div id="s_fr"></div></section>
+   <section><h2>Mais fortes para 5 dias (modelo)</h2><p class="sub">10% melhores: historicamente +1 bps e 55% sobem (sinal mais fraco; muitas vezes é carrego de papel abaixo do par).</p><div id="s_fo"></div></section></div>
+  <section><h2>Fatos relevantes, avisos aos debenturistas e eventos de crédito (60 dias)</h2><div id="s_doc"></div></section>`;
+  h.ativos&&h.ativos.length?tabela($("#s_hoje"),[["cod","Ativo","l"],["emis","Emissor","l",(v,x)=>esc((A(x.cod).emissor||"").slice(0,26))],["bps","% par (bps)","",v=>sg(v,1)],["dtx","Δ taxa (bps)","",(v,x)=>sgt(-x.bps/Math.max(dmod(A(x.cod)),.3),1)],
+    ["imp","Impacto (bps PL)","",v=>sg(v,2)],["perc","% PL","",v=>br(v,2)],["txt","Por quê","l wrap",v=>esc(v)]],h.ativos,{h:360,click:x=>abrir(x.cod)}):$("#s_hoje").innerHTML='<p class="vazio">Nada relevante até agora.</p>';
+  const RA=(f.regras||[]).map(r=>({...r,R:RD[r.regra]}));
+  RA.length?tabela($("#s_reg"),[["cod","Ativo","l"],["nome","Situação","l wrap",(v,x)=>`${esc(x.R.nome)} <span class="mut">(${esc(x.R.alvo)})</span>`],["h1","1 dia","",(v,x)=>cel(x.R,1)],["h5","5 dias","",(v,x)=>cel(x.R,5)],
+    ["h10","10 dias","",(v,x)=>cel(x.R,10)],["h20","20 dias","",(v,x)=>cel(x.R,20)],["imp","Impacto 10d","",(v,x)=>x.R.h[10]?sg(x.R.h[10].mediana*x.perc/100,2," bps"):"—"],["perc","% PL","",v=>br(v,2)]],RA,{h:420,click:x=>abrir(x.cod)}):$("#s_reg").innerHTML='<p class="vazio">Nenhum papel do fundo está numa dessas situações hoje.</p>';
+  const t5=el=>(rows)=>rows.length?tabela(el,[["cod","Ativo","l"],["mu","Centro (bps)","",v=>sg(v,1)],["q08","Faixa 80%","",(v,x)=>`${br(x.q08,0)} a ${br(x.q92,0)}`],["pct","Posição","",v=>br(v,0)+"%"],["perc","% PL","",v=>br(v,2)]],rows,{click:x=>abrir(x.cod)}):el.innerHTML='<p class="vazio">nenhum</p>';
+  t5($("#s_fr"))(f.p5_fracos||[]);t5($("#s_fo"))(f.p5_fortes||[]);
+  const dc=f.docs||[];$("#s_doc").innerHTML=dc.length?`<ul class="ls">${dc.map(d=>`<li><span class="tag ${/Fato|Recupera/.test(d.cat)?"t-dn":"t-up"}">${esc(d.cat)}</span> <span class="mut">${dt(d.data)} · ${esc((d.emissor||"").slice(0,32))} · ${br(d.perc,2)}% PL</span><br>${d.link?`<a href="${esc(d.link)}" target="_blank" rel="noopener">${esc(d.assunto||"documento")}</a>`:esc(d.assunto)}</li>`).join("")}</ul>`:'<p class="vazio">nenhum</p>'}
+// ---------------------------------------------------------------- ativos
+function ativos(){const f=FS;
+  const rows=(f.ativos||[]).map(x=>{const a=A(x.cod);return{...x,emissor:a.emissor,idx:a.idx,taxa:a.taxa,par:a.pct_par,dur:a.duration,dtx:a.dtaxa_1m,vol:a.vol,
+    sinal:(a.prev_hoje&&Math.abs(a.prev_hoje.total)>=3?"H":"")+((a.regras_dias||[]).length?"R":"")+(a.prev5&&a.prev5.sinal?(a.prev5.sinal=="queda"?"Q":"A"):"")}});
+  $("#t_ativos").innerHTML=`<section><h2>Ativos de crédito do fundo</h2><div class="ctl"><input id="bus" placeholder="buscar código ou emissor" aria-label="buscar"><select id="fidx"><option value="">todos os indexadores</option>${[...new Set(rows.map(r=>r.idx))].map(i=>`<option>${esc(i)}</option>`).join("")}</select><span class="mut">clique para ver a projeção, curvas, PnL, fundamentos</span></div><div id="a_t"></div>
+   <p class="nota">Sinal: <span class="tag t-w">H</span> marcação de hoje · <span class="tag t-up">R</span> regra de 1–20 dias · <span class="tag t-dn">Q</span>/<span class="tag t-up">A</span> modelo 5 dias (10% mais fracos/fortes). ${f.outros&&f.outros.length?`Fora desta lista (sem código B3/ANBIMA): ${f.outros.slice(0,6).map(o=>esc(o.cat)+" "+br(o.perc,1)+"%").join(", ")}…`:""}</p></section><div id="a_det"></div>`;
+  const go=()=>{const q=$("#bus").value.toUpperCase(),i=$("#fidx").value;tabela($("#a_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,28))],["idx","Índice","l"],["perc","% PL","",v=>br(v,2)],["rs","R$ mi","",v=>br(v,1)],
+    ["taxa","Taxa","",v=>br(v,2)],["par","% par","",v=>br(v,2)],["dur","Duration","",v=>br(v,2)],["dtx","Δ taxa 1m (bps)","",v=>sgt(v,0)],["vol","Vol","",v=>br(v,2)],["contrib","% risco","",v=>br(v,1)],
+    ["dias_liq","Dias p/ vender","",v=>v==null?"sem neg.":v>60?"> 60":br(v,1)],["sinal","Sinal","",v=>(v||"").split("").map(s=>`<span class="tag ${s=="Q"?"t-dn":s=="H"?"t-w":"t-up"}">${s}</span>`).join(" ")]],
+    rows.filter(r=>(!q||(r.cod+" "+(r.emissor||"")).toUpperCase().includes(q))&&(!i||r.idx==i)),{ord:"perc",h:480,click:x=>abrir(x.cod)})};
+  $("#bus").oninput=go;$("#fidx").onchange=go;go();if(SEL)detalhe(SEL)}
+function abrir(c){aba("ativos");detalhe(c)}
+function detalhe(c){SEL=c;const a=A(c),e=E[a.raiz]||{},h=a.hist||{d:[]},w=pf(c),pr=proj(a),fu=e.fund,ac=e.acao_credito;
+  const p0=h.pA&&h.pA.length?h.pA[h.pA.length-1]:a.pct_par,d0=h.d&&h.d.length?h.d[h.d.length-1]:D.hoje,dm_=dmod(a);
+  const p20=pr[4],p5=pr[2];
+  const leitura=`Em 5 dias úteis o % do PU par deve estar entre <b>${br(p0*Math.exp(p5.lo/1e4),2)}</b> e <b>${br(p0*Math.exp(p5.hi/1e4),2)}</b> (80%), centro ${br(p0*Math.exp(p5.med/1e4),2)} — taxa entre ${br(a.taxa-p5.hi/dm_/100,2)}% e ${br(a.taxa-p5.lo/dm_/100,2)}%. Em 20 dias: ${br(p0*Math.exp(p20.lo/1e4),2)} a ${br(p0*Math.exp(p20.hi/1e4),2)}. Base: ${esc(p20.fonte||p5.fonte)}.`;
+  $("#a_det").innerHTML=`<section><h2>${esc(c)} · ${esc(a.emissor||"")} <span class="mut">${esc(a.indexador||"")} ${a.cupom!=null?"· cupom "+br(a.cupom,2):""} · venc. ${dt(a.venc)} · ${br(w,2)}% do PL</span></h2>
+   ${a.lastro?`<p class="aviso">${esc(a.lastro)}</p>`:""}
+   <div class="kp"><div class="kv"><span>Taxa indicativa</span><b>${br(a.taxa,2)}%</b><i>${dt(a.data_taxa)} · Δ 1 mês ${a.dtaxa_1m==null?"—":br(a.dtaxa_1m,0)+" bps"}</i></div><div class="kv"><span>% do PU par</span><b>${br(a.pct_par,2)}%</b><i>PU ${br(a.pu,2)}</i></div>
+    <div class="kv"><span>Vol 12m</span><b>${br(a.vol,2)}%</b><i>${esc(a.fonte||"")}</i></div><div class="kv"><span>PnL 12m (bps do PU)</span><b>${br(a.pnl_total,0)}</b><i>carrego ${br(a.pnl_car,0)} · taxa ${br(a.pnl_mtm,0)}</i></div>
+    ${e.alav!=null?`<div class="kv"><span>Dívida líq./EBITDA</span><b>${br(e.alav,2)}x</b><i>há 1 ano ${br(e.alav_ant,2)}x · cobertura ${br(e.cob,1)}x</i></div>`:""}
+    ${e.acao?`<div class="kv"><span>Ação ${esc(e.acao.ticker)}</span><b>${sg(e.acao.d1,1,"%")}</b><i>5 dias ${sg(e.acao.s5,1,"%")}</i></div>`:""}</div>
+   <h3>Projeção do % do PU par (6 meses + próximos 20 dias úteis)</h3><p class="leia">${leitura}</p><div id="d_fan" class="pl l"></div>
+   <div class="g2"><div><h3>Taxa indicativa (cheia = ANBIMA, pontilhada = implícita no PU; pontos = negócios B3)</h3><div id="d_tx" class="pl"></div></div><div><h3>PnL acumulado contra a taxa indicativa (bps do PU)</h3><div id="d_pnl" class="pl"></div></div></div>
+   <div class="g2"><div><h3>${ac?"Ação "+esc(e.acao.ticker)+" × taxa (semanal)":"Ação do emissor"}</h3>${ac?'<div id="d_ac" class="pl s"></div>':'<p class="vazio">emissor sem ação listada</p>'}</div>
+    <div><h3>Fundamentos (CVM)</h3>${fu?'<div id="d_fu" class="pl s"></div>':'<p class="vazio">sem ITR/DFP na CVM</p>'}</div></div>
+   <div class="g2"><div><h3>Agenda</h3>${(a.agenda||[]).length?`<ul class="ls">${a.agenda.map(g=>`<li>${esc(g.data)} · ${esc(g.evento)} ${esc(g.pct)}</li>`).join("")}</ul>`:'<p class="vazio">sem eventos em 6 meses</p>'}${e.prox_resultado?`<p>Próximo resultado: ~${dt(e.prox_resultado.esperado)} (entre ${dt(e.prox_resultado.min)} e ${dt(e.prox_resultado.max)})</p>`:""}</div>
+    <div><h3>Documentos CVM (60 dias)</h3>${(e.docs||[]).length?`<ul class="ls">${e.docs.slice(0,8).map(d=>`<li><span class="mut">${dt(d.data)} ${esc(d.cat)}</span> ${d.link?`<a href="${esc(d.link)}" target="_blank" rel="noopener">${esc(d.assunto||"documento")}</a>`:esc(d.assunto)}</li>`).join("")}</ul>`:'<p class="vazio">nenhum</p>'}</div></div></section>`;
+  // leque
+  const z0=new Date(d0+"T12:00:00");z0.setDate(z0.getDate()-180);const i0=h.d.findIndex(d=>d>=z0.toISOString().slice(0,10));
+  const hx=h.d.slice(Math.max(i0,0)),hy=(h.pA||[]).slice(Math.max(i0,0)),fx=pr.map(p=>p.h?diasUteis(d0,p.h):d0);
+  const fy=k=>pr.map(p=>p0*Math.exp(p[k]/1e4));
+  plot("d_fan",[{x:hx,y:hy,name:"% PU par ANBIMA",mode:"lines",line:{color:css("--s1"),width:2}},
+    {x:fx.concat(fx.slice().reverse()),y:fy("hi").concat(fy("lo").reverse()),fill:"toself",mode:"lines",fillcolor:css("--band"),line:{width:0},name:"faixa 10–90%",hoverinfo:"skip"},
+    {x:fx,y:fy("med"),name:"mais provável",mode:"lines+markers",line:{color:css("--s2"),dash:"dot",width:2},text:pr.map(p=>p.h?`${p.h}d: ${br(p.med,0)} bps (taxa ${br(-p.med/dm_,0)} bps)`:"hoje"),hovertemplate:"%{text}<extra></extra>"}],
+    {yaxis:{title:{text:"% do PU par"},gridcolor:css("--line")}});
+  const T=h.tA||[],tc=h.tc||[],ng=h.neg||{d:[],t:[],v:[]};
+  plot("d_tx",[{x:h.d,y:T.map((v,i)=>tc[i]===1?v:null),name:"implícita",mode:"lines",line:{color:css("--s1"),dash:"dot",width:1.4}},{x:h.d,y:T.map((v,i)=>tc[i]===0?v:null),name:"ANBIMA",mode:"lines",line:{color:css("--s1"),width:2}},
+    {x:ng.d,y:ng.t,mode:"markers",name:"negócios",marker:{size:ng.v.map(v=>4+Math.sqrt(v)*2),color:css("--s2"),opacity:.5}}],{yaxis:{title:{text:"% a.a."},gridcolor:css("--line")}});
   const cs=k=>{let s=0;return(h[k]||[]).map(v=>v==null?s:(s+=v))};
-  plot("dt_p",[["car","carrego","--s1"],["mtm","Δ taxa indicativa","--s2"],["res","resíduo","--s4"]].map(([k,n,c])=>({x:h.d,y:cs(k),name:n,mode:"lines",line:{color:css(c),width:1.8}})),{yaxis:{title:{text:"bps"},gridcolor:css("--line")}});
-  const tr5=[{x:h.d,y:h.pA,name:"% PU par ANBIMA",mode:"lines",line:{color:css("--s1"),width:1.8}}];
-  if(a.prev5&&h.pA.length){const p0=h.pA[h.pA.length-1],d0=new Date(h.d[h.d.length-1]+"T12:00:00");let d5=new Date(d0),k=0;while(k<5){d5.setDate(d5.getDate()+1);if(d5.getDay()%6)k++}
-    const f=b=>p0*Math.exp(b/1e4),ds=[h.d[h.d.length-1],d5.toISOString().slice(0,10)];
-    tr5.push({x:ds.concat(ds.slice().reverse()),y:[p0,f(a.prev5.q92),f(a.prev5.q08),p0],fill:"toself",fillcolor:"rgba(194,65,12,.15)",line:{width:0},name:"faixa 80% em 5 dias",hoverinfo:"skip"},
-             {x:ds,y:[p0,f(a.prev5.mu)],mode:"lines",line:{color:css("--s2"),dash:"dot"},name:"centro"})}
-  const z0=new Date(h.d[h.d.length-1]+"T12:00:00");z0.setDate(z0.getDate()-120);const z1=new Date(h.d[h.d.length-1]+"T12:00:00");z1.setDate(z1.getDate()+12);
-  const vis=h.d.map((d,i)=>d>=z0.toISOString().slice(0,10)?h.pA[i]:null).filter(v=>v!=null).concat(a.prev5?[h.pA[h.pA.length-1]*Math.exp(a.prev5.q08/1e4),h.pA[h.pA.length-1]*Math.exp(a.prev5.q92/1e4)]:[]);
-  plot("dt_par",tr5,{yaxis:{gridcolor:css("--line"),range:vis.length?[Math.min(...vis)-.3,Math.max(...vis)+.3]:undefined},xaxis:{range:[z0.toISOString().slice(0,10),z1.toISOString().slice(0,10)],gridcolor:css("--line")},showlegend:false});
-  if(ac){const L=Object.entries(ac.lags).map(([k,v])=>({k:+k,...v}));
-    plot("dt_ac",[{x:ac.datas,y:ac.a.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"ação (log %, acum.)",mode:"lines",line:{color:css("--s3")}},{x:ac.datas,y:ac.t.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"taxa (bps, acum.)",yaxis:"y2",mode:"lines",line:{color:css("--s2")}}],
-      {yaxis2:{overlaying:"y",side:"right",showgrid:false,title:{text:"bps"}},yaxis:{title:{text:"%"},gridcolor:css("--line")}});
-    plot("dt_lag",[{type:"bar",x:L.map(l=>l.k),y:L.map(l=>l.r),marker:{color:L.map(l=>l.lo!=null&&(l.lo>0||l.hi<0)?css("--s2"):css("--s4"))},error_y:{type:"data",symmetric:false,array:L.map(l=>l.hi-l.r),arrayminus:L.map(l=>l.r-l.lo),color:css("--mut")},name:"correlação"}],{showlegend:false,xaxis:{title:{text:"defasagem (semanas)"},dtick:1},yaxis:{range:[-1,1],gridcolor:css("--line")}});
-    plot("dt_sc",[{x:ac.a,y:ac.t,mode:"markers",marker:{size:5,color:css("--s1"),opacity:.6},name:"semanas"}],{showlegend:false,xaxis:{title:{text:"ação (%)"}},yaxis:{title:{text:"Δ taxa (bps)"},gridcolor:css("--line")}})}
-  if(fu){plot("dt_f1",[{x:fu.ref,y:fu.dl_ebitda,name:"DL/EBITDA 12m",mode:"lines+markers",line:{color:css("--s2")}},{x:fu.ref,y:fu.cobertura,name:"EBITDA/desp. fin.",mode:"lines+markers",yaxis:"y2",line:{color:css("--s1")}}],{yaxis:{title:{text:"x"},gridcolor:css("--line")},yaxis2:{overlaying:"y",side:"right",showgrid:false}});
-    const rows=fu.ref.map((r,i)=>({ref:r,ent:fu.entrega[i],rec:fu.receita[i],ebitda:fu.ebitda[i],lucro:fu.lucro[i],dl:fu.dl[i],alav:fu.dl_ebitda[i],mg:fu.margem[i]})).reverse().slice(0,12);
-    tabela($("#dt_ft"),[["ref","Trimestre","l",dt],["ent","Entregue","l",dt],["rec","Receita (R$ mi)","",v=>br(v,0)],["ebitda","EBITDA","",v=>br(v,0)],["lucro","Lucro","",v=>sg(v,0)],["dl","Dív. líq.","",v=>br(v,0)],["alav","DL/EBITDA","",v=>br(v,2)],["mg","Margem 12m","",v=>br(v,1)]],rows,{h:240})}
-  document.querySelectorAll("#at_t tr").forEach(tr=>tr.classList.toggle("sel",A[+tr.dataset.i]===a));$("#det").scrollIntoView({behavior:"smooth",block:"start"})}
-// ------------------------------------------------------------ previsibilidade
-function prev(){const P=D.prev;$("#p_prev").innerHTML=`<section><h2>O que historicamente antecipa o preço (todos os emissores da carteira juntos)</h2><div id="pv_t"></div>
-  <p class="nota">r = correlação com intervalo de 95%. Útil = intervalo não cruza zero E acerto do sinal fora da amostra (último terço do tempo, inclinação estimada só com o passado) acima de 55% e acima da taxa-base.
-  Sem isso o sinal é mostrado, mas não entra no impacto da aba "Hoje".</p></section>
-  <section><h2>Sinais intradiários: o que move a ANBIMA do dia (estudo amplo)</h2><div id="pv_es"></div><p class="nota" id="pv_esn"></p></section>
-  <div class="g2"><section><h2>Valor relativo: spread × alavancagem e duration (DI+)</h2><div id="pv_vr" class="pl"></div><div id="pv_vrt"></div></section>
-  <section><h2>Por emissor: a ação antecipa a taxa?</h2><div id="pv_em"></div></section></div>`;
-  const util=p=>p.lo!=null&&(p.lo>0||p.hi<0)&&p.oos&&p.oos.acerto!=null&&p.oos.acerto>55&&p.oos.acerto>p.oos.base;
-  tabela($("#pv_t"),[["sinal","Sinal","l wrap"],["n","n",""],["r","r","",v=>br(v,2)],["lo","IC 95%","",(v,p)=>p.lo==null?"—":`${br(p.lo,2)} a ${br(p.hi,2)}`],["b","Efeito","",(v,p)=>v==null?(p.z_medio!=null?`|z| ${br(p.z_medio,2)}`:"—"):`${br(v,2)} <span class="mut">${esc(p.unid)}</span>`],
-    ["oos","Acerto fora da amostra","",v=>v&&v.acerto!=null?`${br(v.acerto,0)}% <span class="mut">(base ${br(v.base,0)}%, n=${v.n_teste})</span>`:"—"],["id","Útil?","",(v,p)=>p.r==null?(p.z_medio>1.2?'<span class="tag t-warn">move mais que o normal</span>':'<span class="tag">não</span>'):util(p)?'<span class="tag t-ok">sim</span>':'<span class="tag">não</span>']],P);
-  const Es=D.estudo;if(Es){tabela($("#pv_es"),[["0","Sinal","l wrap"],["1","Quando a ANBIMA anda","l"],["2","Tamanho","l"],["3","Acerto fora da amostra","",v=>br(v,0)+"%"],["4","Taxa-base","",v=>br(v,0)+"%"]],Es.linhas.map(l=>({...l})));
-    $("#pv_esn").textContent=`${Es.papeis} debêntures/CRI/CRA mais negociadas, negócios B3 ${Es.periodo} (${Es.dias_b3} pregões). Alvo: % do PU par da ANBIMA (PU indicativo / PU par). Acerto = sinal certo no último terço do tempo, com a inclinação estimada só com o passado. Momento da ANBIMA, gap de ontem, resultado trimestral e fato relevante não mostraram poder.`}
-  const E5=D.estudo5;if(E5){$("#pv_es").insertAdjacentHTML("beforebegin",`<h3>Próximos 5 dias: o que tem poder (IC = correlação de postos por semana; t)</h3><div id="pv_5"></div><p class="nota">${esc(E5.texto)}. Faixa 80%: cobertura ${E5.cobertura}%, largura mediana ${E5.largura_mediana} bps (ingênua pela vol: ${E5.largura_ingenua}).</p><h3>Mesmo dia</h3>`);
-    tabela($("#pv_5"),[["0","Sinal","l wrap"],["1","Efeito em 5 dias","l"],["2","t","",v=>v?br(v,1):"—"]],E5.features.map(l=>({...l})))}
-  const V=D.valor_rel;if(V){plot("pv_vr",[{x:V.pontos.map(p=>p.alav),y:V.pontos.map(p=>p.taxa),text:V.pontos.map(p=>p.cod),mode:"markers+text",textposition:"top center",textfont:{size:9},marker:{size:8,color:V.pontos.map(p=>p.res),colorscale:[[0,css("--s1")],[.5,css("--s4")],[1,css("--s2")]],showscale:false}}],
-    {showlegend:false,xaxis:{title:{text:"dívida líquida / EBITDA (x)"}},yaxis:{title:{text:"spread CDI+ (%)"},gridcolor:css("--line")}});
-    tabela($("#pv_vrt"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["alav","DL/EBITDA","",v=>br(v,2)],["dur","Duration","",v=>br(v,2)],["taxa","Spread","",v=>br(v,2)],["res","Paga a mais (bps)","",v=>sg(v,0)]],V.pontos,{ord:"res",h:260});
-    $("#pv_vr").insertAdjacentHTML("afterend",`<p class="nota">spread = ${br(V.b[0],2)} + ${br(V.b[1],3)} × alavancagem + ${br(V.b[2],3)} × duration; R² ${br(V.r2,2)}, n=${V.n}. Resíduo positivo = paga mais do que o perfil explica (ou o mercado vê algo que o balanço não mostra).</p>`)}
-  else $("#pv_vr").innerHTML='<p class="vazio">poucos ativos CDI+ com alavancagem conhecida</p>';
-  const L=Object.values(E).filter(e=>e.acao_credito).map(e=>{const l=e.acao_credito.lags;return{nome:e.nome,tk:e.acao.ticker,n:e.acao_credito.n,r0:l[0].r,r1:l[1].r,s1:l[1].lo!=null&&(l[1].lo>0||l[1].hi<0),beta:e.acao_credito.beta,perc:e.perc}});
-  tabela($("#pv_em"),[["nome","Emissor","l",v=>esc((v||"").slice(0,28))],["tk","Ação","l"],["n","Semanas",""],["r0","r mesma semana","",v=>br(v,2)],["r1","r ação → taxa sem. seguinte","",(v,x)=>`${br(v,2)}${x.s1?' <span class="tag t-ok">sig.</span>':""}`],["beta","bps por 1%","",v=>br(v,2)],["perc","% PL","",v=>br(v,2)]],L,{ord:"perc",h:420})}
-// ------------------------------------------------------------ risco
-function risco(){const bt=R.backtest||{};$("#p_risco").innerHTML=`<div class="g2"><section><h2>Retorno diário da carteira oficial × VaR 95%</h2><div id="rk_b" class="pl"></div><p class="nota">${br(bt.violacoes,1)}% dos ${bt.dias} dias abaixo do VaR (esperado 5%). Ativos com série oficial ANBIMA, pesos de hoje.</p></section>
-  <section><h2>Contribuição para o risco</h2><div id="rk_c" class="pl"></div></section></div>
-  <div class="g2"><section><h2>Sensibilidade a fatores (12 meses, diário)</h2><div id="rk_f"></div><p class="nota">β = % do PL por 1% (ou 1 bp) do fator. |t| ≥ 2 é sensibilidade real. Correlação média entre ativos ${br(R.rho,2)}.</p></section>
-  <section><h2>Correlação entre os maiores ativos (retornos diários oficiais)</h2><div id="rk_m" class="pl"></div></section></div>`;
-  const S=R.serie||{d:[],ret:[]};plot("rk_b",[{x:S.d,y:S.ret,type:"bar",name:"retorno diário (%)",marker:{color:S.ret.map(v=>v<S.var?css("--crit"):css("--s4"))}},{x:[S.d[0],S.d[S.d.length-1]],y:[S.var,S.var],mode:"lines",name:"VaR 95%",line:{color:css("--crit"),dash:"dash"}}],{yaxis:{title:{text:"%"},gridcolor:css("--line")}});
-  const C=A.filter(a=>a.contrib_pct!=null).sort((a,b)=>b.contrib_pct-a.contrib_pct).slice(0,20).reverse();
-  plot("rk_c",[{type:"bar",orientation:"h",y:C.map(a=>a.codigo),x:C.map(a=>a.contrib_pct),marker:{color:css("--s1")},name:"% do risco"}],{showlegend:false,margin:{l:80,r:12,t:10,b:30},xaxis:{title:{text:"% do risco"},gridcolor:css("--line")}});
-  tabela($("#rk_f"),[["fator","Fator","l"],["beta","β","",v=>br(v,4)],["t","t","",v=>br(v,1)],["r","r","",v=>br(v,2)],["r2","R²","",v=>br(v,2)],["n","dias",""]],R.fatores||[],{ord:"r2"});
-  const M=R.corr;plot("rk_m",[{type:"heatmap",z:M.m,x:M.cods,y:M.cods,zmin:-1,zmax:1,colorscale:[[0,css("--s1")],[.5,css("--card")],[1,css("--s2")]]}],{showlegend:false,margin:{l:70,r:10,t:10,b:70},xaxis:{tickfont:{size:9}},yaxis:{tickfont:{size:9}}})}
-// ------------------------------------------------------------ método
-function metodo(){$("#p_metodo").innerHTML=`<section><h2>Como cada número é calculado</h2><ul class="ls">
- <li><b>Retorno do dia</b> = (PU indicativo + pagamentos) / PU indicativo anterior − 1. Amortização e juros entram como pagamento: o PU cai, mas não é perda.</li>
- <li><b>PnL contra a taxa indicativa</b>: carrego = rendimento do PU par (contrato, com o índice) + diferença entre a taxa indicativa e o cupom; Δ taxa = −duration modificada × variação da taxa indicativa; resíduo = o que sobra (convexidade, evento não informado, marcação).</li>
- <li><b>Taxa antes do arquivo diário da ANBIMA</b> = taxa implícita no PU oficial (o cálculo da ANBIMA invertido, dia a dia, para trás). Nesses dias o resíduo não é medido.</li>
- <li><b>Vol</b> = desvio dos retornos diários oficiais em 12 meses × √252. Sem série oficial: negócios semanais (SND ou B3) com o ruído de negócio descontado; sem nada: mediana dos pares de mesmo índice e duration.</li>
- <li><b>VaR</b> 95% paramétrico: vols × correlação dos retornos oficiais (≥ 60 dias em comum, encolhida 30% para a média). Backtest com os pesos de hoje nos últimos 250 dias.</li>
- <li><b>Fundamentos</b>: ITR/DFP da CVM (consolidado). EBITDA = EBIT + depreciação/amortização da DFC. Dívida = empréstimos e financiamentos (circulante + não circulante); caixa = caixa + aplicações. Data de entrega = 1ª entrega à CVM (o que o mercado sabia).</li>
- <li><b>Previsibilidade</b>: correlações com intervalo de 95% (Fisher) e teste fora da amostra (ajuste nos 2/3 mais antigos, teste no terço final). Só sinais que passam nos dois viram impacto estimado.</li>
- <li><b>Fontes</b>: ANBIMA Data (páginas públicas), ANBIMA arquivo diário, B3 (negócios de balcão, futuros), SND, CVM (ITR, DFP, IPE, FCA, securitizadoras), Yahoo Finance, SmartWealth (índices IDA/JGP/IMA, leitura local), BCB (CDI, Focus), Tesouro Direto, IBGE, Google Notícias.</li></ul></section>`}
-function tudo(){resumo();agenda();mercado();ativos();prev();risco();metodo();let a="resumo";try{a=localStorage.getItem("vm_aba")||a}catch(e){};aba(ABAS.some(x=>x[0]==a)?a:"resumo")}
-tudo();
-</script>"""
+  plot("d_pnl",[["car","carrego","--s1"],["mtm","Δ taxa","--s2"],["res","resíduo","--s4"]].map(([k,n,c])=>({x:h.d,y:cs(k),name:n,mode:"lines",line:{color:css(c),width:1.8}})),{yaxis:{title:{text:"bps"},gridcolor:css("--line")}});
+  if(ac){const cum=v=>v.reduce((r,x)=>{r.push((r.length?r[r.length-1]:0)+x);return r},[]);
+    plot("d_ac",[{x:ac.datas,y:cum(ac.a),name:"ação (%)",mode:"lines",line:{color:css("--s3")}},{x:ac.datas,y:cum(ac.t),name:"taxa (bps)",yaxis:"y2",mode:"lines",line:{color:css("--s2")}}],{yaxis2:{overlaying:"y",side:"right",showgrid:false},yaxis:{gridcolor:css("--line")}})}
+  if(fu)plot("d_fu",[{x:fu.ref,y:fu.dl_ebitda,name:"dívida líq./EBITDA",mode:"lines+markers",line:{color:css("--s2")}},{x:fu.ref,y:fu.cobertura,name:"EBITDA/desp. fin.",mode:"lines+markers",yaxis:"y2",line:{color:css("--s1")}}],{yaxis:{title:{text:"x"},gridcolor:css("--line")},yaxis2:{overlaying:"y",side:"right",showgrid:false}});
+  $("#a_det").scrollIntoView({behavior:"smooth",block:"start"})}
+// ---------------------------------------------------------------- risco
+function risco(){const f=FS,r=f.risco,pl=f.pl||0;
+  if(!r){$("#t_risco").innerHTML='<section><p class="vazio">Fundo sem ativos de crédito com marcação suficiente.</p></section>';return}
+  const bt=r.backtest||{};
+  $("#t_risco").innerHTML=`<div class="kp"><div class="kv"><span>Vol anual (crédito marcado)</span><b>${br(r.vol,2)}%</b><i>sem diversificação ${br(r.vol_sem_div,2)}%</i></div>
+   <div class="kv"><span>VaR 95% 1 dia</span><b>R$ ${br(r.var95_1d/100*pl,2)} mi</b><i>${br(r.var95_1d,3)}% do PL</i></div><div class="kv"><span>Backtest (250 dias)</span><b>${br(bt.violacoes,1)}%</b><i>esperado 5% · real ${br(bt.vol_real,2)}% vs modelo ${br(bt.vol_modelo,2)}%</i></div>
+   <div class="kv"><span>Correlação média entre papéis</span><b>${br(r.rho,2)}</b><i>${r.n} papéis, ${br(r.cobertura,1)}% do PL</i></div></div>
+  <div class="g2"><section><h2>Cenários</h2><div id="r_cen"></div><p class="nota">Choques instantâneos sobre a duration de cada papel; default com recuperação de 40%.</p></section>
+   <section><h2>Quem concentra o risco</h2><div id="r_con" class="pl"></div></section></div>
+  <div class="g2"><section><h2>Retorno diário × VaR 95%</h2><div id="r_bt" class="pl"></div></section><section><h2>Sensibilidade a fatores (12 meses)</h2><div id="r_fat"></div><p class="nota">β em % do PL por 1% (ou 1 bp) do fator; |t| ≥ 2 é sensibilidade real.</p></section></div>
+  <section><h2>Correlação entre os maiores papéis</h2><div id="r_cor" class="pl l"></div></section>`;
+  tabela($("#r_cen"),[["nome","Cenário","l wrap"],["pct","% do PL","",v=>sg(v,2,"%")],["rs","R$ mi","",v=>sg(v/1e6,1)]],f.cenarios||[]);
+  const C=(f.ativos||[]).filter(x=>x.contrib!=null).sort((a,b)=>b.contrib-a.contrib).slice(0,15).reverse();
+  plot("r_con",[{type:"bar",orientation:"h",y:C.map(x=>x.cod),x:C.map(x=>x.contrib),marker:{color:css("--s1")},name:"% do risco"}],{showlegend:false,margin:{l:80,r:12,t:8,b:30},xaxis:{title:{text:"% do risco"},gridcolor:css("--line")}});
+  const S=r.serie||{d:[],ret:[]};plot("r_bt",[{x:S.d,y:S.ret,type:"bar",name:"retorno diário (%)",marker:{color:S.ret.map(v=>v<S.var?css("--dn"):css("--s4"))}},{x:[S.d[0],S.d[S.d.length-1]],y:[S.var,S.var],mode:"lines",name:"VaR 95%",line:{color:css("--dn"),dash:"dash"}}],{yaxis:{gridcolor:css("--line")}});
+  tabela($("#r_fat"),[["fator","Fator","l"],["beta","β","",v=>br(v,4)],["t","t","",v=>br(v,1)],["r2","R²","",v=>br(v,2)]],r.fatores||[],{ord:"r2"});
+  const M=r.corr;plot("r_cor",[{type:"heatmap",z:M.m,x:M.cods,y:M.cods,zmin:-1,zmax:1,colorscale:[[0,css("--s2")],[.5,css("--card")],[1,css("--s1")]]}],{showlegend:false,margin:{l:76,r:10,t:8,b:76},xaxis:{tickfont:{size:9}},yaxis:{tickfont:{size:9}}})}
+// ---------------------------------------------------------------- agenda
+function agenda(){const f=FS,ag=f.agenda||[];const caixa=ag.filter(a=>a.rs!=null&&a.data<=diasUteis(D.hoje,63)).reduce((s,a)=>s+a.rs,0);
+  $("#t_agenda").innerHTML=`<div class="kp"><div class="kv"><span>Caixa de amortizações e vencimentos (3 meses)</span><b>R$ ${br(caixa,1)} mi</b><i>${br(caixa/(f.pl||1)*100,2)}% do PL (estimado)</i></div>
+   <div class="kv"><span>Resultados de emissores (30 dias)</span><b>${ag.filter(a=>/Resultado/.test(a.evento)&&a.data<=diasUteis(D.hoje,21)).length}</b><i>datas estimadas pelo histórico de entregas à CVM</i></div>
+   <div class="kv"><span>Focus</span><b>${D.focus&&D.focus.Selic?"Selic "+br(Object.values(D.focus.Selic.anos)[0],2)+"%":"—"}</b><i>${D.focus&&D.focus.IPCA?"IPCA "+Object.entries(D.focus.IPCA.anos).slice(0,2).map(([a,v])=>a+" "+br(v,2)+"%").join(" · "):""}</i></div></div>
+  <section><h2>Próximos 120 dias</h2><div class="ctl seg" id="ag_f"><button class="on" data-k="">tudo</button><button data-k="Amortiza|Vencimento|Resgate">caixa</button><button data-k="juros">juros</button><button data-k="Resultado">resultados</button><button data-k="IPCA">macro</button></div><div id="ag_t"></div>
+   <p class="nota">Amortização e vencimento em R$ = % do valor nominal × posição (estimado). Pagamento não é perda: o PU cai e o caixa entra.</p></section>`;
+  const go=k=>tabela($("#ag_t"),[["data","Data","l",dt],["evento","Evento","l"],["pct","%","l"],["cod","Ativo","l"],["rs","R$ mi","",v=>v==null?"":br(v,2)],["perc","% PL","",v=>br(v,2)]],ag.filter(a=>!k||new RegExp(k,"i").test(a.evento+" "+a.cod)),{h:620,click:x=>AT[x.cod]&&abrir(x.cod)});
+  go("");$("#ag_f").onclick=e=>{if(e.target.dataset.k==null)return;$("#ag_f").querySelectorAll("button").forEach(b=>b.classList.toggle("on",b==e.target));go(e.target.dataset.k)}}
+// ---------------------------------------------------------------- mercado
+function mercado(){const f=FS;
+  $("#t_mercado").innerHTML=`<div class="g2"><section><h2>Índices de crédito e renda fixa</h2><div id="m_idx"></div><div id="m_ic" class="pl s"></div><p class="nota">IDA (ANBIMA) e JGP via SmartWealth; dia em desvios = variação / desvio diário de 1 ano.</p></section>
+   <section><h2>Juros (B3, ~15 min) e referências</h2><div id="m_j"></div><div id="m_ref"></div></section></div>
+  <section><h2>Notícias dos emissores do fundo (14 dias)</h2><div id="m_n" class="g3"></div></section>`;
+  const I=Object.entries(D.indices).map(([k,v])=>({k,...v}));
+  tabela($("#m_idx"),[["k","Índice","l"],["data","Data","",dt],["d1","Dia","",v=>sg(v,3,"%")],["z","Desvios","",v=>sg(v,1)],["m1","1 mês","",v=>sg(v,2,"%")],["a12","12 meses","",v=>sg(v,1,"%")]],I.filter(x=>/IDA|JGP|IMA-B|IRF/.test(x.k)));
+  plot("m_ic",I.filter(x=>/IDA|JGP/.test(x.k)).map(v=>{const n=Math.max(0,v.d.findIndex(d=>d>=diasUteis(D.hoje,-1).replace(/^(\d{4})/,y=>y-1)));const b=v.v[n];return{x:v.d.slice(n),y:v.v.slice(n).map(q=>q/b*100),name:v.k,mode:"lines",line:{width:1.4}}}),{yaxis:{gridcolor:css("--line")}});
+  const J=D.juros||{};$("#m_j").innerHTML=Object.keys(J).length?`<div class="sc"><table><tr><th class="l">Prazo</th>${Object.keys(J).map(k=>`<th>${k}</th><th>Δ bps</th>`).join("")}</tr>${(J.DI1||J.DAP||[]).map((_,i)=>`<tr><td class="l">${(J.DI1||J.DAP)[i].prazo}</td>${Object.values(J).map(L=>L[i]?`<td>${br(L[i].taxa,2)}</td><td>${sgt(L[i].bps,1)}</td>`:"<td></td><td></td>").join("")}</tr>`).join("")}</table></div>`:'<p class="vazio">fora do pregão</p>';
+  tabela($("#m_ref"),[["k","","l"],["preco","Último","",v=>br(v,2)],["d1","Dia","",v=>sg(v,2,"%")],["z","Desvios","",v=>sg(v,1)],["m1","1 mês","",v=>sg(v,1,"%")]],Object.entries(D.mercado).map(([k,v])=>({k,...v})));
+  const N=(f.raizes||[]).filter(r=>D.noticias[r]).map(r=>[r,D.noticias[r]]);
+  $("#m_n").innerHTML=N.length?N.map(([r,n])=>`<div><h3>${esc((E[r]||{}).nome||n.busca)}</h3><ul class="ls">${n.itens.slice(0,6).map(i=>`<li>${i.alerta.length?`<span class="tag t-dn">${esc(i.alerta[0])}</span> `:""}<a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.titulo)}</a> <span class="mut">${dt(i.data)}</span></li>`).join("")}</ul></div>`).join(""):'<p class="vazio">sem notícias</p>'}
+// ---------------------------------------------------------------- tudo
+function avisos(){const f=FS,m=f.mes,idade=m?Math.round((new Date(D.hoje)-new Date(m+"-28"))/864e5/30):null;
+  $("#avisos").innerHTML=(f.fonte!="planilha"&&idade>1?`<div class="aviso">Carteira de ${esc(m)} (${esc(f.fonte)}): a CVM divulga as carteiras com atraso. Para usar a posição de hoje, salve a planilha em <b>carteiras/${esc(f.nome)}.xlsx</b> (colunas ativo e perc_nav).</div>`:"")+
+   (f.credito_pct<1?`<div class="aviso">Fundo sem crédito privado com marcação ANBIMA: aparecem só patrimônio, retorno, alocação e captação.</div>`:"")}
+function tudo(){avisos();geral();sinais();ativos();risco();agenda();mercado();let a="geral";try{a=localStorage.getItem("mc_aba")||a}catch(e){};aba(ABAS.some(x=>x[0]==a)?a:"geral")}
+let ini=0;try{const id=localStorage.getItem("mc_fundo");const i=F.findIndex(f=>f.id==id);if(i>=0)ini=i;else ini=F.findIndex(f=>f.nome=="Dual")}catch(e){};ini=Math.max(ini,0);
+$("#fundo").value=ini;FS=F[ini];tudo();
+</script>
+"""
 
 
 if __name__ == "__main__":
@@ -1913,7 +2214,5 @@ if __name__ == "__main__":
     if args and args[0] == "modelo":
         modelo()
     else:
-        arq = Path(args[0]) if args and args[0].lower().endswith((".xlsx", ".xls")) else PASTA / "carteira_modelo.xlsx"
-        if not arq.exists():
-            sys.exit(f"carteira não encontrada: {arq}  (crie uma com: python vol_monitor.py modelo)")
+        arq = next((Path(a) for a in args if a.lower().endswith((".xlsx", ".xls"))), None)
         rodar(arq) if "rodar" in args else uma_vez(arq)
