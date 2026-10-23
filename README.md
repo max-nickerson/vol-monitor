@@ -17,6 +17,16 @@ Monitor dos fundos internos, um arquivo só (`vol_monitor.py`). O seletor no top
 | **Agenda** | amortizações e vencimentos em R$, juros, resultados estimados dos emissores, IPCA; Focus |
 | **Mercado** | índices de crédito e renda fixa; DI1/DAP ao vivo; referências (Ibovespa, dólar, commodities, Treasury); notícias dos emissores do fundo |
 
+**Arquivo da gestora** (formato de entrada preferido): `carteiras/<fundo>.xlsx` com as colunas `date, nome_fundo, tipo, codigo_IAM_ativo, ticker_bolsa, issuer, vencimento, isin, perc_nav` (perc_nav em fração do PL). O monitor:
+- soma a mesma posição que aparece em blocos diferentes;
+- classifica cada linha:
+  - crédito: DEB, CRA, CRI, LF, LFSC, LFSN, NC, FIDC, FIAGRO;
+  - bonds, títulos públicos, compromissada;
+  - caixa, despesas, derivativos, fundos;
+- usa o código B3/CETIP para cruzar com ANBIMA, B3 e CVM.
+
+Para gerar só um fundo: `python vol_monitor.py carteiras/Dual.xlsx`. Os arquivos de carteira não vão para o git.
+
 **Carteiras:** por padrão vem a última carteira aberta de cada fundo na CVM, que é divulgada com atraso. Para usar a posição atual, salve `carteiras/<nome do fundo>.xlsx` com as colunas `ativo` (`CODIGO - AAAA-MM-DD`) e `perc_nav`. Cota, PL, captação e resgate vêm do informe diário da CVM. A lista de fundos internos sai do painel de fundos (`PAINEL_HTML`).
 
 ## Previsão da marcação ANBIMA de hoje (aba Hoje)

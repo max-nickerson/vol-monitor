@@ -157,8 +157,75 @@ def log(m):
 CODIGO = re.compile(r"^\s*([A-Z0-9]{4,15})\s*[-–]\s*(\d{4}-\d{2}-\d{2})")
 
 
+COD_DEB = re.compile(r"^([A-Z]{3}[A-Z0-9]\d{2}|[A-Z]{4}[A-Z0-9]\d|CR[AI][0-9A-Z]{6,12}|\d{2}[A-L]\d{7})$")
+COD_BANC = re.compile(r"^(LF|LFSC|LFSN|NC|CDB)[0-9A-Z]{6,12}$")
+
+
+def categoria(tipo, cod, isin=""):
+    """Categoria da linha do arquivo da gestora (tipo + código)."""
+    t, c, i = str(tipo or ""), str(cod or "").upper(), str(isin or "").upper()
+    if t.startswith("Despesa"):
+        return "Despesas"
+    if t.startswith("Caixa"):
+        return "Caixa"
+    if t in ("Future", "Option"):
+        return "Derivativos"
+    if t == "Fund":
+        return "Fundos"
+    if c.startswith("BOND_COLLATERAL"):
+        return "Bonds (colateral)"
+    if c.startswith("OVERPRE"):
+        return "Compromissada"
+    if c.startswith("BRSTN"):
+        return "Títulos Públicos"
+    if re.match(r"^(US|XS|USL|USN)[0-9A-Z]{9,10}$", c) or i.startswith(("US", "XS")):
+        return "Bonds"
+    if c.startswith("CRA"):
+        return "CRA"
+    if re.match(r"^\d{2}[A-L]\d{7}$", c):
+        return "CRI"
+    if c.startswith("LFSC"):
+        return "LFSC"
+    if c.startswith("LFSN"):
+        return "LFSN"
+    if c.startswith("LF"):
+        return "LF"
+    if c.startswith("NC"):
+        return "NC"
+    if c[:1] == "5":
+        return "FIDC"
+    if c[:1] == "4":
+        return "FIAGRO"
+    if COD_DEB.match(c):
+        return "DEB"
+    return "Outros"
+
+
+def le_df_gestora(d):
+    """Arquivo da gestora (date, nome_fundo, tipo, codigo_IAM_ativo, ticker_bolsa, issuer, vencimento, isin, perc_nav em fração do PL):
+    soma a mesma posição que aparece em blocos diferentes e devolve a carteira no formato do monitor (perc_nav em %)."""
+    d = d.copy()
+    d.columns = [c.strip() for c in d.columns]
+    d["perc"] = pd.to_numeric(d.perc_nav.astype(str).str.replace(",", "."), errors="coerce").fillna(0) * 100
+    d["cod"] = d.codigo_IAM_ativo.astype(str).str.strip().str.upper()
+    d["cat"] = [categoria(t, c, i) for t, c, i in zip(d.tipo, d.cod, d.get("isin", ""))]
+    nulo = lambda v: None if str(v).strip().upper() in ("NULL", "NAN", "NONE", "") else str(v).strip()
+    d["venc"] = pd.to_datetime(d.vencimento.map(nulo), dayfirst=True, errors="coerce").dt.strftime("%Y-%m-%d")
+    out = []
+    for (fundo, cod, cat), g in d.groupby(["nome_fundo", "cod", "cat"], sort=False):
+        r = g.iloc[0]
+        cod_mon = cod if cat in ("DEB", "CRA", "CRI", "LF", "LFSC", "LFSN", "NC") and (COD_DEB.match(cod) or COD_BANC.match(cod)) else None
+        rot = nulo(r.ticker_bolsa) or cod
+        out.append({"nome_fundo": fundo, "entrada": f"{cod} - {r.venc}" if cod_mon else rot, "codigo": cod_mon, "venc": r.venc if cod_mon else None,
+                    "perc_nav": float(g.perc.sum()), "cat": cat, "rotulo": rot, "emis_cvm": nulo(r.issuer), "isin": nulo(r.get("isin")),
+                    "data_carteira": str(r.date)[:10]})
+    return pd.DataFrame(out)
+
+
 def le_carteira(arq):
     d = pd.read_excel(arq, dtype=str)
+    if "codigo_IAM_ativo" in [c.strip() for c in d.columns]:
+        return le_df_gestora(d)
     col = {c.lower().strip(): c for c in d.columns}
     a = col.get("ativo", d.columns[0])
     p = next((col[k] for k in ("perc_nav", "%nav", "perc", "% nav", "% pl") if k in col), d.columns[1])
@@ -908,6 +975,8 @@ def identifica(c):
             x.update(tipo=q["tipo"], cnpj=q["cnpj"] or x["cnpj"], indexador=x["indexador"] or q["taxa"], lastro="devedor do " + q["tipo"])
         if x["emissor"] and re.search(r"SECURITIZ", str(x["emissor"]).upper()) and x["tipo"] == "DEB":
             x["lastro"] = "debênture de securitizadora: o risco é o lastro, não a securitizadora"
+        if not x["emissor"] and isinstance(getattr(r, "emis_cvm", None), str):
+            x["emissor"] = r.emis_cvm
         x["raiz"] = raiz(x["cnpj"])
         x["idx"] = tipo_idx(x["indexador"])
         out.append(x)
@@ -1036,7 +1105,7 @@ def calcula(c):
     cods = [c for c in a.codigo.dropna()]
     log(f"carteira: {len(a)} linhas, {len(cods)} com código")
     an = anbima_diario()
-    of_hist, resumo, agenda = anbima_paginas(cods)
+    of_hist, resumo, agenda = anbima_paginas([c for c in cods if COD_DEB.match(c) and not COD_BANC.match(c)])
     neg = negocios(list(pd.bdate_range(B3_INICIO, HOJE)), set(cods))
     cdi = sgs(12, HOJE - pd.DateOffset(years=4))
     log("ANBIMA, B3 e CDI ok")
@@ -1641,8 +1710,12 @@ def carteiras_internas():
         m = f["abertos"][-1] if f["abertos"] else None
         manual = PASTA / "carteiras" / f"{f['nome']}.xlsx"
         if manual.exists():
-            c = le_carteira(manual).assign(cat="manual", rotulo=lambda d: d.entrada)
-            fonte, m = "planilha", pd.Timestamp(manual.stat().st_mtime, unit="s").strftime("%Y-%m")
+            c = le_carteira(manual)
+            if "cat" not in c:
+                c = c.assign(cat="manual", rotulo=lambda d: d.entrada)
+            fonte = "arquivo da gestora" if "data_carteira" in c else "planilha"
+            m = (pd.to_datetime(c.data_carteira.iloc[0], dayfirst=True).strftime("%Y-%m-%d") if "data_carteira" in c
+                 else pd.Timestamp(manual.stat().st_mtime, unit="s").strftime("%Y-%m"))
         else:
             a = A[(A.id == f["id"]) & (A.mes == m)].groupby(["ch", "rot", "cat", "emis"], as_index=False, dropna=False).perc.sum()
             linhas = []
@@ -2003,12 +2076,25 @@ def uma_vez(arq=None):
     HOJE = pd.Timestamp.today().normalize()
     t0 = time.time()
     if arq:
-        c = le_carteira(arq).assign(cat="planilha", rotulo=lambda d: d.entrada)
-        fundos = {"planilha": {"id": "planilha", "nome": Path(arq).stem, "cnpj": None, "pl": None, "mes": HOJE.strftime("%Y-%m"), "fonte": "planilha", "carteira": c}}
+        c = le_carteira(arq)
+        if "nome_fundo" in c:
+            try:
+                meta = {f["nome"]: f for f in painel_dados()["fundos"]}
+            except Exception:
+                meta = {}
+            fundos = {}
+            for nome, cf in c.groupby("nome_fundo"):
+                m = meta.get(nome, {})
+                fundos[nome] = {"id": m.get("id", nome), "nome": nome, "cnpj": m.get("cnpj"), "pl": m.get("pl"), "carteira": cf,
+                                "mes": pd.to_datetime(cf.data_carteira.iloc[0], dayfirst=True).strftime("%Y-%m-%d"), "fonte": "arquivo da gestora"}
+        else:
+            c = c.assign(cat="planilha", rotulo=lambda d: d.entrada)
+            fundos = {"planilha": {"id": "planilha", "nome": Path(arq).stem, "cnpj": None, "pl": None, "mes": HOJE.strftime("%Y-%m"), "fonte": "planilha", "carteira": c}}
     else:
         fundos, _ = carteiras_internas()
     U = pd.concat([f["carteira"].dropna(subset=["codigo"]) for f in fundos.values()])
-    U = U.groupby("codigo", as_index=False).agg(venc=("venc", "first"), perc_nav=("perc_nav", "max"), entrada=("entrada", "first"))
+    U = U.groupby("codigo", as_index=False).agg(venc=("venc", "first"), perc_nav=("perc_nav", "max"), entrada=("entrada", "first"),
+                                                **({"emis_cvm": ("emis_cvm", "first")} if "emis_cvm" in U else {}))
     log(f"fundos: {len(fundos)}; ativos com código (união): {len(U)}")
     A, emis, prev, idx_c, mkt, td_, diarios = calcula(U)
     cdi = sgs(12, HOJE - pd.DateOffset(years=4))
@@ -2314,7 +2400,7 @@ function mercado(){const f=FS;
   $("#m_n").innerHTML=N.length?N.map(([r,n])=>`<div><h3>${esc((E[r]||{}).nome||n.busca)}</h3><ul class="ls">${n.itens.slice(0,6).map(i=>`<li>${i.alerta.length?`<span class="tag t-dn">${esc(i.alerta[0])}</span> `:""}<a href="${esc(i.link)}" target="_blank" rel="noopener">${esc(i.titulo)}</a> <span class="mut">${dt(i.data)}</span></li>`).join("")}</ul></div>`).join(""):'<p class="vazio">sem notícias</p>'}
 // ---------------------------------------------------------------- tudo
 function avisos(){const f=FS,m=f.mes,idade=m?Math.round((new Date(D.hoje)-new Date(m+"-28"))/864e5/30):null;
-  $("#avisos").innerHTML=(f.fonte!="planilha"&&idade>1?`<div class="aviso">Carteira de ${esc(m)} (${esc(f.fonte)}): a CVM divulga as carteiras com atraso. Para usar a posição de hoje, salve a planilha em <b>carteiras/${esc(f.nome)}.xlsx</b> (colunas ativo e perc_nav).</div>`:"")+
+  $("#avisos").innerHTML=(!/planilha|gestora/.test(f.fonte)&&idade>1?`<div class="aviso">Carteira de ${esc(m)} (${esc(f.fonte)}): a CVM divulga as carteiras com atraso. Para usar a posição de hoje, salve a planilha em <b>carteiras/${esc(f.nome)}.xlsx</b> (colunas ativo e perc_nav).</div>`:"")+
    (f.credito_pct<1?`<div class="aviso">Fundo sem crédito privado com marcação ANBIMA: aparecem só patrimônio, retorno, alocação e captação.</div>`:"")}
 function tudo(){avisos();geral();sinais();negocios();ativos();risco();agenda();mercado();let a="geral";try{a=localStorage.getItem("mc_aba")||a}catch(e){};aba(ABAS.some(x=>x[0]==a)?a:"geral")}
 let ini=0;try{const id=localStorage.getItem("mc_fundo");const i=F.findIndex(f=>f.id==id);if(i>=0)ini=i;else ini=F.findIndex(f=>f.nome=="Dual")}catch(e){};ini=Math.max(ini,0);
