@@ -83,6 +83,13 @@ ESTUDO = {"papeis": 447, "dias_b3": 814, "periodo": "04/2023 a 10/2026", "linhas
     ["Outros papéis do emissor negociados (papel sem negócio)", "mesmo dia / 5 dias", "6,5% do gap", 57, 54],
     ["Tom do mercado (gap médio, R$ 50 mi+)", "mesmo dia", "22% do gap médio", 60, 50],
     ["Gap de ontem não fechado / movimento de ontem da ANBIMA", "dia seguinte", "nada", 50, 51]]}
+ESTUDO5 = {"texto": "Teste fora da amostra (walk-forward mensal, 04/2024–10/2026, 161 mil previsões, 437 papéis, embargo de 12 dias)",
+           "cobertura": 77, "largura_mediana": 111, "largura_ingenua": 117, "ic": 0.078, "ic_t": 5.7,
+           "decis": [["pior 10%", -5.3, 46], ["2º", -2.2, 47], ["3º", -2.1, 48], ["5º", 0.6, 52], ["8º", 2.3, 54], ["9º", 3.1, 55], ["melhor 10%", 1.0, 55]],
+           "features": [["Semana contra o mercado / longe da média de 20 dias", "reverte (cai → volta)", -4.5],
+                        ["% do par (abaixo do par)", "sobe (carrego)", -6.1], ["Negócios do mês acima da marcação", "ANBIMA sobe", 3.0],
+                        ["Varejo da semana acima da marcação", "ANBIMA sobe", 2.8], ["Ação do emissor 5–20 dias", "mesmo sentido", 2.2],
+                        ["Vol, volume, dias sem negócio, lado dos negócios", "nada", 0]]}
 ALERTAS = ["recuperação judicial", "recuperacao judicial", "default", "inadimpl", "rebaix", "downgrade", "vencimento antecipado",
            "rating", "aquisição", "fusão", "renegocia", "covenant", "waiver", "prejuízo", "reestrutura", "falência", "investigação",
            "assembleia", "multa", "rescis", "calote"]
@@ -1194,6 +1201,14 @@ def calcula(arq):
     A["prev_hoje"] = pd.Series([None] * len(A), index=A.index, dtype=object)
     juros = juros_b3()
     previsao_hoje(A, an, emis, juros)
+    try:
+        p5, info5 = modelo5(list(A.codigo.dropna()))
+    except Exception as e:
+        log(f"previsão 5d: erro {type(e).__name__} {e}")
+        p5, info5 = {}, {}
+    A["prev5"] = [p5.get(c) for c in A.codigo]
+    A.attrs["info5"] = info5
+    log(f"previsão 5d: {len(p5)} ativos ({time.time() - t0:.0f}s)")
     A.attrs["juros"] = juros
     log(f"previsibilidade ok ({time.time() - t0:.0f}s)")
     # ---------------- mercado e risco
@@ -1316,6 +1331,148 @@ def valor_relativo(A, emis):
     r2 = float(1 - k.res_bps.var() / (k.taxa * 100).var())
     return {"b": [round(float(q), 4) for q in b], "r2": r2, "n": len(k),
             "pontos": [{"cod": q.codigo, "emissor": q.emissor, "alav": round(q.alav, 2), "taxa": q.taxa, "dur": q.duration, "res": round(q.res_bps, 0)} for q in k.itertuples()]}
+
+
+# ================================================================== previsão de 5 dias úteis (% do PU par) com intervalo
+F5 = ["m5", "m20", "m60", "dev20", "dev60", "vol20", "vol60", "vol250", "vratio", "parado20", "maxabs20", "nivel", "rel5", "rel20", "anos", "idx_c",
+      "press5", "press20", "varejo5", "varejo20", "lvol5", "lvol20", "imb5", "imb20", "dias_sem_neg"]
+NOME5 = {"m5": "andou na semana", "m20": "andou no mês", "m60": "andou em 3 meses", "dev20": "longe da média de 20 dias", "dev60": "longe da média de 60 dias",
+         "vol20": "vol 20 dias", "vol60": "vol 60 dias", "vol250": "vol 1 ano", "vratio": "vol subindo", "parado20": "marcação parada", "maxabs20": "maior salto no mês",
+         "nivel": "% do par (abaixo do par sobe pelo carrego)", "rel5": "semana contra o mercado", "rel20": "mês contra o mercado", "anos": "prazo",
+         "idx_c": "indexador", "press5": "negócios da semana vs marcação", "press20": "negócios do mês vs marcação", "varejo5": "varejo da semana vs marcação",
+         "varejo20": "varejo do mês vs marcação", "lvol5": "volume da semana", "lvol20": "volume do mês", "imb5": "lado dos negócios (semana)",
+         "imb20": "lado dos negócios (mês)", "dias_sem_neg": "dias sem negócio"}
+
+
+def painel5(an_cods=None):
+    """Painel (papel, dia) com features point in time, a partir de todo histórico ANBIMA em cache e dos negócios B3."""
+    rows, pares = [], []
+    for f in (DADOS / "anbima_hist").glob("*.parquet"):
+        h = pd.read_parquet(f)
+        if h.pu_ind.notna().sum() < 120 or not (h.pu_par > 0).any():
+            continue
+        v = serie_oficial(h)
+        if len(v) < 120:
+            continue
+        rows.append(pd.DataFrame({"cod": f.stem, "data": v.data.values, "p": (v.pu_ind / v.pu_par).values, "E": v.E.values}))
+        pares.append(pd.DataFrame({"cod": f.stem, "data": h.data.values, "pu_par": h.pu_par.values}).dropna())
+    S = pd.concat(rows, ignore_index=True).sort_values(["cod", "data"]).reset_index(drop=True)
+    S = S[S.p.between(0.2, 1.6)].reset_index(drop=True)
+    g = S.groupby("cod")
+    S["lp"] = np.log(S.p) * 1e4
+    S["y0"] = S.lp - g.lp.shift()
+    S.loc[(S.E > 0) | (S.y0.abs() > 1500), "y0"] = np.nan
+    S["y5"] = g.lp.shift(-5) - S.lp
+    pag5 = g.E.transform(lambda e: e[::-1].rolling(5, min_periods=1).sum()[::-1].shift(-1))
+    S.loc[((g.data.shift(-5) - S.data).dt.days > 9) | (pag5 > 0) | (S.y5.abs() > 3000), "y5"] = np.nan
+    r = lambda c, k, fn, mp: S[c].groupby(S.cod).transform(lambda x: getattr(x.rolling(k, min_periods=mp), fn)())
+    y0f = S.y0.fillna(0).rename("y0f")
+    S["y0f"] = y0f
+    for k in (5, 20, 60):
+        S[f"m{k}"] = r("y0f", k, "sum", int(k * .8))
+    S["dev20"], S["dev60"] = S.lp - r("lp", 20, "mean", 15), S.lp - r("lp", 60, "mean", 45)
+    S["vol20"], S["vol60"], S["vol250"] = r("y0", 20, "std", 12), r("y0", 60, "std", 40), r("y0", 250, "std", 120)
+    S["vratio"] = S.vol20 / S.vol60
+    S["parado"] = (S.y0.abs() < 0.5).astype(float)
+    S["parado20"] = r("parado", 20, "mean", 12)
+    S["absy"] = S.y0.abs()
+    S["maxabs20"] = r("absy", 20, "max", 12)
+    S["nivel"] = S.lp
+    cad = cadastro_b3().drop_duplicates("cod").set_index("cod")
+    S["idx"] = S.cod.map(cad.idx).fillna("").map(tipo_idx)
+    S["idx_c"] = S.idx.map({"DI+": 0, "IPCA": 1, "PRE": 2, "%DI": 3, "IGPM": 4}).fillna(5)
+    mk = S.groupby(["idx", "data"]).y0.mean().rename("mk0").reset_index().sort_values("data")
+    mk["mk5"] = mk.groupby("idx").mk0.transform(lambda x: x.rolling(5, min_periods=4).sum())
+    mk["mk20"] = mk.groupby("idx").mk0.transform(lambda x: x.rolling(20, min_periods=15).sum())
+    S = S.merge(mk, on=["idx", "data"], how="left")
+    S["rel5"], S["rel20"] = S.m5 - S.mk5, S.m20 - S.mk20
+    S["anos"] = (pd.to_datetime(S.cod.map(snd_caracteristicas().venc)) - S.data).dt.days / 365.25
+    # negócios B3 contra a ANBIMA do mesmo dia
+    n = negocios(list(pd.bdate_range(B3_INICIO, HOJE)), set(S.cod))
+    n = n[(n.vol > 0) & (n.pu > 0)]
+    P = pd.concat(pares).drop_duplicates(["cod", "data"])
+    n = n.merge(P, on=["cod", "data"]).merge(S[["cod", "data", "p"]], on=["cod", "data"])
+    n["gf"] = np.log(n.pu / n.pu_par / n.p) * 1e4
+    n = n[n.gf.abs() < 500]
+    inst = n.vol >= MIN_DIA
+    d = n[inst].assign(gv=lambda x: x.gf * x.vol, sv=lambda x: np.sign(x.gf) * x.vol).groupby(["cod", "data"])[["gv", "vol", "sv"]].sum()
+    rv = n[~inst].assign(rgv=lambda x: x.gf * x.vol).groupby(["cod", "data"]).agg(rgv=("rgv", "sum"), rvol=("vol", "sum"))
+    S = S.merge(d.join(rv, how="outer").reset_index(), on=["cod", "data"], how="left")
+    for c in ("gv", "vol", "sv", "rgv", "rvol"):
+        S[c] = S[c].fillna(0)
+    for k in (5, 20):
+        gv, vol = r("gv", k, "sum", 1), r("vol", k, "sum", 1)
+        S[f"press{k}"], S[f"lvol{k}"] = (gv / vol).where(vol >= 1e6), np.log1p(vol / 1e6)
+        S[f"imb{k}"] = (r("sv", k, "sum", 1) / vol).where(vol >= 1e6)
+        rg, rvv = r("rgv", k, "sum", 1), r("rvol", k, "sum", 1)
+        S[f"varejo{k}"] = (rg / rvv).where(rvv > 0)
+    S["dias_sem_neg"] = S.groupby("cod").vol.transform(lambda x: (x > 0).astype(int).groupby((x > 0).cumsum()).cumcount())
+    S.loc[S.data < B3_INICIO, ["press5", "press20", "lvol5", "lvol20", "imb5", "imb20", "varejo5", "varejo20", "dias_sem_neg"]] = np.nan
+    S["mk_y5"] = S.groupby(["idx", "data"]).y5.transform("mean")
+    S["y5i"] = S.y5 - S.mk_y5
+    return S
+
+
+def modelo5(cods):
+    """Treina 1x por dia (cache): média idiossincrática de 5 dias (LightGBM huber) e escala (log|y5|); intervalo 8–92% = média + fator
+    conformal × escala, fator por faixa de escala, calibrado nos 6 meses antes de um embargo de 12 dias. Devolve previsões para `cods`."""
+    try:
+        import lightgbm as lgb
+    except ImportError:
+        log("previsão 5d: instale lightgbm")
+        return {}, {}
+    S = painel5()
+    hoje_ = S.groupby("cod").data.transform("max") == S.data
+    ult = S[hoje_ & S.cod.isin(cods)]
+    treino = S.dropna(subset=["y5"])
+    treino = treino[treino.data >= B3_INICIO - pd.DateOffset(years=3)]
+    corte = treino.data.max() - pd.Timedelta(days=12)
+    cal_ini = corte - pd.Timedelta(days=200)
+    prm = dict(n_estimators=250, learning_rate=0.03, num_leaves=15, min_child_samples=500, subsample=0.7, subsample_freq=1, colsample_bytree=0.7,
+               reg_lambda=5, verbose=-1)
+    fm = DADOS / f"modelo5_{HOJE:%Y%m%d}.json"
+    if fm.exists():
+        j = json.loads(fm.read_text())
+        mu, sg = lgb.Booster(model_str=j["mu"]), lgb.Booster(model_str=j["sg"])
+        cortes, kq, info = np.array(j["cortes"]), {int(k): v for k, v in j["kq"].items()}, j["info"]
+    else:
+        tr = treino[treino.data < cal_ini - pd.Timedelta(days=12)]
+        mu = lgb.LGBMRegressor(objective="huber", alpha=15, **prm).fit(tr[F5], tr.y5i).booster_
+        sg = lgb.LGBMRegressor(objective="l2", **prm).fit(tr[F5], np.log(np.abs(tr.y5) + 1)).booster_
+        cal = treino[treino.data >= cal_ini]
+        esc = np.exp(sg.predict(cal[F5]))
+        z = (cal.y5 - mu.predict(cal[F5])) / esc
+        cortes = np.quantile(esc, [0.2, 0.4, 0.6, 0.8])
+        fx = np.digitize(esc, cortes)
+        kq = {b: np.quantile(z[fx == b], [0.08, 0.92]).tolist() for b in range(5)}
+        cob = float(np.mean([(lo <= zz <= hi) for zz, b in zip(z, fx) for lo, hi in [kq[b]]]) * 100)
+        info = {"treino": int(len(tr)), "papeis": int(S.cod.nunique()), "ate": str(tr.data.max())[:10], "calibracao": f"{cal_ini:%d/%m/%y}–{corte:%d/%m/%y}",
+                "cobertura_cal": cob}
+        # depois de calibrar, retreina a média com tudo até o embargo (mais dado recente)
+        tr2 = treino[treino.data < corte]
+        mu = lgb.LGBMRegressor(objective="huber", alpha=15, **prm).fit(tr2[F5], tr2.y5i).booster_
+        fm.write_text(json.dumps({"mu": mu.model_to_string(), "sg": sg.model_to_string(), "cortes": cortes.tolist(), "kq": kq, "info": info}))
+        for velho_ in DADOS.glob("modelo5_*.json"):
+            if velho_ != fm:
+                velho_.unlink(missing_ok=True)
+    # previsões de hoje + decil no universo de hoje
+    U = S[hoje_ & (S.data >= S.data.max() - pd.Timedelta(days=5))]
+    mu_u = pd.Series(mu.predict(U[F5]), index=U.cod.values)
+    out = {}
+    if len(ult):
+        m = mu.predict(ult[F5])
+        e = np.exp(sg.predict(ult[F5]))
+        b = np.digitize(e, cortes)
+        contrib = mu.predict(ult[F5], pred_contrib=True)
+        for i, (c, row) in enumerate(zip(ult.cod, ult.itertuples())):
+            lo, hi = m[i] + kq[b[i]][0] * e[i], m[i] + kq[b[i]][1] * e[i]
+            pct = float((mu_u < m[i]).mean() * 100)
+            top = sorted(zip(F5, contrib[i][:-1]), key=lambda t: -abs(t[1]))[:3]
+            out[c] = {"mu": float(m[i]), "q08": float(lo), "q92": float(hi), "pct_univ": pct, "data": row.data.strftime("%Y-%m-%d"),
+                      "sinal": "queda" if pct <= 10 else "alta" if pct >= 90 else None,
+                      "porque": [{"f": NOME5.get(f, f), "bps": round(float(v), 1), "valor": None if not np.isfinite(getattr(row, f)) else round(float(getattr(row, f)), 2)} for f, v in top]}
+    info["n_univ_hoje"] = int(len(U))
+    return out, info
 
 
 # ================================================================== previsão da marcação ANBIMA de hoje
@@ -1491,7 +1648,7 @@ def uma_vez(arq):
         if it:
             news[e["raiz"]] = {"busca": q, "itens": it}
     ctx = {"agenda": ag, "sinais": sinais(A, emis, prev, ipca, ag), "noticias": news, "juros": A.attrs.get("juros") or juros_b3(), "focus": focus(),
-           "estudo": ESTUDO, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref")}
+           "estudo": ESTUDO, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref"), "info5": A.attrs.get("info5"), "estudo5": ESTUDO5}
     h = pagina(A, emis, prev, R, idx_c, mkt, td_, vr, ctx)
     (SAIDA / "vol_monitor.html").write_text(h, encoding="utf-8")
     log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB")
@@ -1579,6 +1736,7 @@ function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio
    <div class="k"><span>PnL 12m: carrego</span><b>${br(pnl("pnl_car")/100,2)}%</b><i>do PL, ativos com série oficial</i></div>
    <div class="k"><span>PnL 12m: taxa indicativa</span><b>${sg(pnl("pnl_mtm")/100,2,"%")}</b><i>resíduo ${br(pnl("pnl_res")/100,2)}%</i></div></div>
   <section><h2>Previsão da marcação ANBIMA de hoje</h2><div id="ph"></div></section>
+  <section><h2>Próximos 5 dias úteis: onde o % do PU par deve estar</h2><div id="p5"></div></section>
   <section><h2>O que olhar agora</h2><div id="sin"></div><p class="nota">Ordenado pelo impacto estimado em bps do PL e pelo peso. Impacto só aparece quando o sinal é estatisticamente útil (aba "O que antecipa").</p></section>
   <div class="g2"><section><h2>Mercado de crédito hoje</h2><div id="r_idx"></div></section><section><h2>Ativos que mais andaram em 1 mês (taxa indicativa)</h2><div id="r_mov"></div></section></div>`;
   const PH=A.filter(a=>a.prev_hoje).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,...a.prev_hoje,txt:Object.entries(a.prev_hoje.comp).map(([k,c])=>`${k}: ${sg(c.bps,1)} (${esc(c.txt)})`).join("<br>")}));
@@ -1587,6 +1745,14 @@ function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio
    <p class="nota">bps de % do PU par (positivo = PU sobe). Δ taxa ≈ −% par / duration modificada. Regras do estudo intradiário (aba "O que antecipa"): negócio do papel conta pelo volume (≥ R$ 20 mi: a ANBIMA anda 39% do gap, acerto 82%); papel IPCA anda com o DAP; ação ≥ 2% no dia.</p>`;
   PH.length?tabela($("#ph_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["total","% par (bps)","",v=>sg(v,1)],["dtaxa","Δ taxa (bps)","",v=>sgi(v,1)],["impacto_pl","Impacto (bps PL)","",v=>sg(v,2)],["perc","% PL","",v=>br(v,2)],["txt","Por quê","l wrap",v=>v]],
     PH.sort((a,b)=>Math.abs(b.impacto_pl)-Math.abs(a.impacto_pl)),{h:380}):$("#ph_t").innerHTML='<p class="vazio">Sem negócios relevantes, juros ou ações fora do normal até agora.</p>';
+  const P5=A.filter(a=>a.prev5).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,par:a.pct_par,...a.prev5,dur:a.duration,
+     porq:a.prev5.porque.map(x=>`${esc(x.f)} ${sg(x.bps,1)}`).join(" · ")}));
+  const I5=D.info5||{};
+  $("#p5").innerHTML=P5.length?`<p>Faixa de 80% para o % do PU par daqui a 5 dias úteis (8%–92%) e o centro esperado do papel contra o mercado. <span class="tag t-crit">queda</span> / <span class="tag t-ok">alta</span> = 10% mais fracos/fortes do universo hoje (${I5.n_univ_hoje||"—"} papéis): historicamente ${D.estudo5.decis[0][1]} e +${D.estudo5.decis[6][1]} bps em 5 dias, ${D.estudo5.decis[0][2]}% e ${D.estudo5.decis[6][2]}% de alta.</p><div id="p5_t"></div>
+   <p class="nota">Modelo treinado hoje com ${I5.papeis||"—"} papéis (até ${dt(I5.ate)}); intervalo calibrado em ${esc(I5.calibracao||"")} (cobertura ${br(I5.cobertura_cal,0)}%). Teste fora da amostra: cobertura ${D.estudo5.cobertura}%, IC ${br(D.estudo5.ic,3)} (t ${br(D.estudo5.ic_t,1)}). O centro é pequeno de propósito: em 5 dias a maior parte do movimento é ruído; a faixa é o que mais importa.</p>`:'<p class="vazio">sem previsão (instale lightgbm)</p>';
+  if(P5.length)tabela($("#p5_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,24))],["par","% par hoje","",v=>br(v,2)],["mu","Centro (bps)","",v=>sg(v,1)],
+    ["q08","Faixa (bps)","",(v,x)=>`${sg(x.q08,0)} a ${sg(x.q92,0)}`],["q92","Faixa em taxa (bps)","",(v,x)=>`${sgi(-x.q92/Math.max(x.dur||1,.3),0)} a ${sgi(-x.q08/Math.max(x.dur||1,.3),0)}`],
+    ["pct_univ","Posição no universo","",(v,x)=>`${br(v,0)}%${x.sinal?` <span class="tag ${x.sinal=="queda"?"t-crit":"t-ok"}">${x.sinal}</span>`:""}`],["porq","Por quê (bps)","l wrap",v=>v],["perc","% PL","",v=>br(v,2)]],P5,{ord:"pct_univ",h:380});
   const S=D.sinais.map(s=>({...s,imp:s.impacto_bps_pl}));
   const cls=t=>/Fato|Recupera|Dado/.test(t)?"t-crit":/Negócio|Ação/.test(t)?"t-warn":"t-ok";
   S.length?tabela($("#sin"),[["tipo","Tipo","l",v=>`<span class="tag ${cls(v)}">${esc(v)}</span>`],["ativo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,32))],["quando","Quando","l",v=>/\d{4}-/.test(v)?dt(v):esc(v)],
@@ -1647,7 +1813,12 @@ function detalhe(a){SEL=a;const e=E[a.raiz]||{},h=a.hist||{d:[]};const ac=e.acao
     {x:(h.neg||{}).d,y:(h.neg||{}).t,mode:"markers",name:"negócios",marker:{size:(h.neg||{v:[]}).v.map(v=>4+Math.sqrt(v)*2),color:css("--s2"),opacity:.5}},mk(rx,ry,"triangle-up","--s3","resultado"),mk(fx,fy,"diamond","--crit","fato relevante")],{yaxis:{title:{text:"% a.a."},gridcolor:css("--line")}});
   const cs=k=>{let s=0;return(h[k]||[]).map(v=>v==null?s:(s+=v))};
   plot("dt_p",[["car","carrego","--s1"],["mtm","Δ taxa indicativa","--s2"],["res","resíduo","--s4"]].map(([k,n,c])=>({x:h.d,y:cs(k),name:n,mode:"lines",line:{color:css(c),width:1.8}})),{yaxis:{title:{text:"bps"},gridcolor:css("--line")}});
-  plot("dt_par",[{x:h.d,y:h.pA,name:"% PU par ANBIMA",mode:"lines",line:{color:css("--s1"),width:1.8}}],{yaxis:{gridcolor:css("--line")},showlegend:false});
+  const tr5=[{x:h.d,y:h.pA,name:"% PU par ANBIMA",mode:"lines",line:{color:css("--s1"),width:1.8}}];
+  if(a.prev5&&h.pA.length){const p0=h.pA[h.pA.length-1],d0=new Date(h.d[h.d.length-1]+"T12:00:00");let d5=new Date(d0),k=0;while(k<5){d5.setDate(d5.getDate()+1);if(d5.getDay()%6)k++}
+    const f=b=>p0*Math.exp(b/1e4),ds=[h.d[h.d.length-1],d5.toISOString().slice(0,10)];
+    tr5.push({x:ds.concat(ds.slice().reverse()),y:[p0,f(a.prev5.q92),f(a.prev5.q08),p0],fill:"toself",fillcolor:"rgba(194,65,12,.15)",line:{width:0},name:"faixa 80% em 5 dias",hoverinfo:"skip"},
+             {x:ds,y:[p0,f(a.prev5.mu)],mode:"lines",line:{color:css("--s2"),dash:"dot"},name:"centro"})}
+  plot("dt_par",tr5,{yaxis:{gridcolor:css("--line")},showlegend:false});
   if(ac){const L=Object.entries(ac.lags).map(([k,v])=>({k:+k,...v}));
     plot("dt_ac",[{x:ac.datas,y:ac.a.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"ação (log %, acum.)",mode:"lines",line:{color:css("--s3")}},{x:ac.datas,y:ac.t.reduce((r,v)=>{r.push((r.length?r[r.length-1]:0)+v);return r},[]),name:"taxa (bps, acum.)",yaxis:"y2",mode:"lines",line:{color:css("--s2")}}],
       {yaxis2:{overlaying:"y",side:"right",showgrid:false,title:{text:"bps"}},yaxis:{title:{text:"%"},gridcolor:css("--line")}});
@@ -1669,6 +1840,8 @@ function prev(){const P=D.prev;$("#p_prev").innerHTML=`<section><h2>O que histor
     ["oos","Acerto fora da amostra","",v=>v&&v.acerto!=null?`${br(v.acerto,0)}% <span class="mut">(base ${br(v.base,0)}%, n=${v.n_teste})</span>`:"—"],["id","Útil?","",(v,p)=>p.r==null?(p.z_medio>1.2?'<span class="tag t-warn">move mais que o normal</span>':'<span class="tag">não</span>'):util(p)?'<span class="tag t-ok">sim</span>':'<span class="tag">não</span>']],P);
   const Es=D.estudo;if(Es){tabela($("#pv_es"),[["0","Sinal","l wrap"],["1","Quando a ANBIMA anda","l"],["2","Tamanho","l"],["3","Acerto fora da amostra","",v=>br(v,0)+"%"],["4","Taxa-base","",v=>br(v,0)+"%"]],Es.linhas.map(l=>({...l})));
     $("#pv_esn").textContent=`${Es.papeis} debêntures/CRI/CRA mais negociadas, negócios B3 ${Es.periodo} (${Es.dias_b3} pregões). Alvo: % do PU par da ANBIMA (PU indicativo / PU par). Acerto = sinal certo no último terço do tempo, com a inclinação estimada só com o passado. Momento da ANBIMA, gap de ontem, resultado trimestral e fato relevante não mostraram poder.`}
+  const E5=D.estudo5;if(E5){$("#pv_es").insertAdjacentHTML("beforebegin",`<h3>Próximos 5 dias: o que tem poder (IC = correlação de postos por semana; t)</h3><div id="pv_5"></div><p class="nota">${esc(E5.texto)}. Faixa 80%: cobertura ${E5.cobertura}%, largura mediana ${E5.largura_mediana} bps (ingênua pela vol: ${E5.largura_ingenua}).</p><h3>Mesmo dia</h3>`);
+    tabela($("#pv_5"),[["0","Sinal","l wrap"],["1","Efeito em 5 dias","l"],["2","t","",v=>v?br(v,1):"—"]],E5.features.map(l=>({...l})))}
   const V=D.valor_rel;if(V){plot("pv_vr",[{x:V.pontos.map(p=>p.alav),y:V.pontos.map(p=>p.taxa),text:V.pontos.map(p=>p.cod),mode:"markers+text",textposition:"top center",textfont:{size:9},marker:{size:8,color:V.pontos.map(p=>p.res),colorscale:[[0,css("--s1")],[.5,css("--s4")],[1,css("--s2")]],showscale:false}}],
     {showlegend:false,xaxis:{title:{text:"dívida líquida / EBITDA (x)"}},yaxis:{title:{text:"spread CDI+ (%)"},gridcolor:css("--line")}});
     tabela($("#pv_vrt"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["alav","DL/EBITDA","",v=>br(v,2)],["dur","Duration","",v=>br(v,2)],["taxa","Spread","",v=>br(v,2)],["res","Paga a mais (bps)","",v=>sg(v,0)]],V.pontos,{ord:"res",h:260});

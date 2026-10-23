@@ -41,9 +41,34 @@ A calibração vem de um estudo com 447 debêntures, CRI e CRA e com os negócio
 - o fato relevante;
 - a ação antecipando a semana seguinte.
 
+## Próximos 5 dias úteis: faixa de 80% e direção (aba Hoje)
+O modelo é treinado uma vez por dia com todo o histórico ANBIMA em cache (~440 papéis). Dele saem duas peças:
+- **Centro:** quanto o papel deve andar contra o mercado (LightGBM).
+- **Faixa:** a vol prevista × um fator calibrado nos 6 meses anteriores, por faixa de vol (conformal). O alvo de cobertura é 80%.
+
+Cada papel vem com os 3 fatores que mais pesaram na previsão.
+
+Teste fora da amostra (walk-forward mensal, 04/2024–10/2026, 161 mil previsões):
+
+| Medida | Resultado |
+|---|---|
+| Cobertura da faixa | 77% |
+| Largura da faixa | 111 bps, contra 117 da banda pela vol do próprio papel |
+| Correlação de postos por semana (IC) | 0,078 (t = 5,7) |
+| 10% mais fracos | −5 bps contra o mercado em 5 dias; subiram em 46% das vezes |
+| 10% mais fortes | +1 bps; subiram em 55% das vezes |
+
+O que tem poder:
+- reversão de curto prazo (o papel que caiu na semana contra o mercado volta);
+- papel abaixo do par sobe pelo carrego;
+- negócios do mês acima da marcação;
+- ação do emissor em 5 a 20 dias.
+
+Vol, volume, dias sem negócio e o lado dos negócios não ajudam.
+
 ## Rodar
 ```
-pip install pandas numpy requests pyarrow openpyxl lxml selenium
+pip install pandas numpy requests pyarrow openpyxl lxml selenium lightgbm
 python vol_monitor.py modelo                    # cria carteira_modelo.xlsx (15 debêntures mais negociadas)
 python vol_monitor.py carteira.xlsx             # uma vez
 python vol_monitor.py carteira.xlsx rodar       # a cada 15 min no pregão
