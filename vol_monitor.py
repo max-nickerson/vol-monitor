@@ -66,6 +66,23 @@ INDICES = {"IDA DI": "credito/anbima-ida-di-ida-di-index", "IDA IPCA ex-infra": 
            "IRF-M": "renda-fixa/anbima-irf-m-irf-m-index", "CDI": "taxas/cdi-certificado-deposito-interbancario",
            "IEE (energia)": "acoes/iee-indice-de-energia-eletrica-b3", "IMOB": "acoes/imob-indice-imobiliario-b3",
            "IMAT (materiais)": "acoes/imat-indice-de-materiais-basicos-b3", "ICON (consumo)": "acoes/icon-b3"}
+# Estudo intradiário (447 debêntures/CRI/CRA, negócios B3 04/2023–10/2026, teste fora da amostra no último terço):
+# fração do gap (negócio − ANBIMA de ontem, em % do PU par) que a ANBIMA do dia anda, por volume do papel no dia; acerto do sinal
+FRACAO_GAP = [(1e6, 0.0, 52), (5e6, 0.07, 58), (20e6, 0.30, 73), (float("inf"), 0.39, 82)]     # (até R$, fração, acerto %)
+B_EMISSOR, B_MERCADO, B_ACAO = 0.065, 0.10, 1.8      # outros papéis do emissor; tom do mercado (sem negócio); bps de % par por 1% da ação
+ESTUDO = {"papeis": 447, "dias_b3": 814, "periodo": "04/2023 a 10/2026", "linhas": [
+    ["Negócio ≥ R$ 20 mi no dia, longe da ANBIMA de ontem", "mesmo dia", "anda 39% do gap", 82, 52],
+    ["Negócio R$ 5–20 mi", "mesmo dia", "anda 30% do gap", 73, 50],
+    ["Negócio R$ 1–5 mi", "mesmo dia", "anda 7% do gap", 58, 51],
+    ["Negócio < R$ 1 mi (varejo)", "mesmo dia", "ruído", 52, 51],
+    ["Negócio ≥ R$ 1 mi até as 11h", "mesmo dia", "anda 24% do gap", 71, 52],
+    ["Negócio depois das 17h", "dia seguinte", "+4% do gap", 55, 54],
+    ["Origem 'Registro' (vs Voice)", "mesmo dia", "18% vs 11% do gap", 76, 57],
+    ["Juros reais do dia (IMA-B) em papéis IPCA", "mesmo dia", "r = 0,68", 83, 56],
+    ["Ação do emissor no dia", "mesmo dia", "1,8 bps de % par por 1%", 57, 51],
+    ["Outros papéis do emissor negociados (papel sem negócio)", "mesmo dia / 5 dias", "6,5% do gap", 57, 54],
+    ["Tom do mercado (gap médio, R$ 50 mi+)", "mesmo dia", "22% do gap médio", 60, 50],
+    ["Gap de ontem não fechado / movimento de ontem da ANBIMA", "dia seguinte", "nada", 50, 51]]}
 ALERTAS = ["recuperação judicial", "recuperacao judicial", "default", "inadimpl", "rebaix", "downgrade", "vencimento antecipado",
            "rating", "aquisição", "fusão", "renegocia", "covenant", "waiver", "prejuízo", "reestrutura", "falência", "investigação",
            "assembleia", "multa", "rescis", "calote"]
@@ -193,7 +210,7 @@ def negocios(dias, cods=None):
                 return f if f.exists() else None
             if len(x):
                 x.columns = cols[:x.shape[1]]
-                x = x[x.tipo.isin(["DEB", "CRI", "CRA", "LF", "LFSN", "LFSC", "NC", "CFF"]) & x.situacao.ne("Cancelado")]
+                x = x[x.tipo.isin(["DEB", "CRI", "CRA", "LF", "LFSN", "LFSC", "NC", "CFF"]) & ~x.situacao.fillna("").str.contains("Cancelado")]
                 x = x.assign(qtd=num(x.qtd).values, pu=num(x.pu).values, vol=num(x.vol).values, taxa=num(x.taxa).values,
                              data=pd.to_datetime(x.data, dayfirst=True))
             else:
@@ -1174,6 +1191,10 @@ def calcula(arq):
         if cod in taxas and isinstance(ng, pd.DataFrame):
             pool_neg += [(d, g_, m0, m1, gc, vv, cod) for d, g_, m0, m1, gc, vv in negocio_x_marcacao(ng, taxas[cod])]
     prev = previsibilidade(pool_lead, pool_ev, pool_fr, pool_neg)
+    A["prev_hoje"] = pd.Series([None] * len(A), index=A.index, dtype=object)
+    juros = juros_b3()
+    previsao_hoje(A, an, emis, juros)
+    A.attrs["juros"] = juros
     log(f"previsibilidade ok ({time.time() - t0:.0f}s)")
     # ---------------- mercado e risco
     idx_c = indices_credito()
@@ -1297,22 +1318,78 @@ def valor_relativo(A, emis):
             "pontos": [{"cod": q.codigo, "emissor": q.emissor, "alav": round(q.alav, 2), "taxa": q.taxa, "dur": q.duration, "res": round(q.res_bps, 0)} for q in k.itertuples()]}
 
 
+# ================================================================== previsão da marcação ANBIMA de hoje
+def previsao_hoje(A, an, emis, juros):
+    """Para cada ativo, o movimento esperado do % do PU par na ANBIMA de hoje (bps), somando: negócios do próprio papel na B3
+    (fração do gap pelo volume), juros (DAP ao vivo × duration, papéis IPCA), outros papéis do emissor, tom do mercado e a ação."""
+    if not len(an):
+        return
+    d1 = an[an.data < HOJE].data.max()
+    a1 = an[an.data == d1].drop_duplicates("codigo").set_index("codigo")
+    a2 = an[an.data == an[an.data < d1].data.max()].drop_duplicates("codigo").set_index("codigo")
+    par1 = a1.pu / a1.pct_par * 100
+    par2 = a2.pu / a2.pct_par * 100
+    cresc = (par1 / par2.reindex(par1.index)).where(lambda g_: g_.between(0.999, 1.003)).fillna(1.0004)   # PU par: um dia de rendimento
+    nh = negocios([HOJE])
+    nh = nh[nh.cod.isin(a1.index) & (nh.vol >= MIN_DIA) & (nh.pu > 0)].copy()
+    nh["gap"] = np.log(nh.pu.values / (par1.reindex(nh.cod).values * cresc.reindex(nh.cod).values) / (a1.pct_par.reindex(nh.cod).values / 100)) * 1e4
+    nh = nh[nh.gap.abs() < 500]
+    g = nh.assign(gv=nh.gap * nh.vol).groupby("cod").agg(gv=("gv", "sum"), vol=("vol", "sum"), n=("vol", "size"))
+    g["gap"] = g.gv / g.vol
+    cad = cadastro_b3().drop_duplicates("cod").set_index("cod")
+    emis_cod = cad.emissor.str.upper().str.strip()
+    g["emissor"] = [emis_cod.get(c) for c in g.index]
+    g["idx"] = [tipo_idx(cad.idx.get(c)) for c in g.index]
+    grande = g[g.vol >= 1e6]
+    mkt = {i: float(x.gv.sum() / x.vol.sum()) for i, x in grande.groupby("idx") if x.vol.sum() >= 50e6}
+    dap = {int(v["prazo"][:-1]): v["bps"] for v in (juros or {}).get("DAP", []) if v.get("bps") is not None}
+    for i in A.index[A.coberto]:
+        x = A.loc[i]
+        cod, comp = x.codigo, {}
+        dur = x.duration if x.duration == x.duration else 2.0
+        tx = x.taxa if isinstance(x.taxa, (int, float)) and x.taxa == x.taxa else 0.0
+        dm = dur / (1 + tx / 100) if x.idx in ("IPCA", "PRE", "IGPM") else dur
+        usa_dap = x.idx == "IPCA" and any(abs(v) > 0.05 for v in dap.values())
+        juro = 0.0
+        if usa_dap:
+            k = min(dap, key=lambda a_: abs(a_ - dur))
+            juro = -dm * dap[k]
+            if abs(juro) >= 0.5:
+                comp["juros"] = {"bps": juro, "txt": f"DAP {k}a {dap[k]:+.1f} bps × duration mod. {dm:.1f}"}
+        if cod in g.index:
+            r = g.loc[cod]
+            fr, ac = next((f, h) for lim, f, h in FRACAO_GAP if r.vol < lim)
+            comp["negocio"] = {"bps": fr * (r.gap - juro), "txt": f"{int(r.n)} negócios, R$ {r.vol / 1e6:.1f} mi a {r.gap:+.0f} bps do % par de ontem"
+                               + (f" ({r.gap - juro:+.0f} além do juro)" if juro else "") + f" (acerto histórico {ac}%)"}
+        else:
+            em = str(emis_cod.get(cod, "") or "")
+            o = grande[grande.emissor.eq(em)] if em else grande.iloc[:0]
+            if len(o):
+                gi = float(o.gv.sum() / o.vol.sum())
+                comp["emissor"] = {"bps": B_EMISSOR * gi, "txt": f"outros papéis do emissor: R$ {o.vol.sum() / 1e6:.0f} mi a {gi:+.0f} bps"}
+            elif x.idx in mkt and not usa_dap:                     # IPCA com DAP ao vivo: o juro já entra abaixo
+                comp["mercado"] = {"bps": B_MERCADO * mkt[x.idx], "txt": f"mercado {x.idx}: gap médio {mkt[x.idx]:+.0f} bps"}
+        ac_ = (emis.get(x.raiz) or {}).get("acao") if isinstance(x.raiz, str) else None
+        if ac_ and ac_.get("d1") is not None and abs(ac_["d1"]) >= 2:
+            comp["acao"] = {"bps": B_ACAO * ac_["d1"], "txt": f"{ac_['ticker']} {ac_['d1']:+.1f}% hoje"}
+        if comp:
+            tot = float(sum(c["bps"] for c in comp.values()))
+            A.at[i, "prev_hoje"] = {"comp": comp, "total": tot, "dtaxa": -tot / max(dm, 0.05), "impacto_pl": tot * x.perc_nav / 100}
+    A.attrs["mercado_hoje"] = {k: round(v, 1) for k, v in mkt.items()}
+    A.attrs["data_ref"] = d1.strftime("%Y-%m-%d")
+
+
 # ================================================================== o que olhar (sinais de hoje)
 def sinais(A, emis, prev, ipca, agenda_tot):
     P = {p["id"]: p for p in prev}
     out = []
-    pn = P.get("negocio_marcacao")
-    for x in A[A.coberto].itertuples():
-        h = getattr(x, "hoje", None)
-        h = h if isinstance(h, dict) else None
-        if h and abs(h["bps"]) >= 10 and h["vol"] >= NEG_INST / 1e6:
-            esp = pn["b"] * h["bps"] if pn and pn.get("b") else None
-            dm = x.duration if x.idx in ("DI+", "%DI") else x.duration / (1 + (x.taxa or 0) / 100)
-            imp = -dm * (esp if esp is not None else h["bps"]) * x.perc_nav / 100
+    for x in A[A.coberto].itertuples():                      # previsão da marcação de hoje: negócio relevante do próprio papel
+        ph = getattr(x, "prev_hoje", None)
+        c = (ph or {}).get("comp", {}).get("negocio") if isinstance(ph, dict) else None
+        if c and abs(c["bps"]) >= 3:
             out.append({"tipo": "Negócio hoje", "ativo": x.codigo, "emissor": x.emissor, "quando": "hoje",
-                        "texto": f"negociado a {h['taxa']:.2f}% ({h['bps']:+.0f} bps vs ANBIMA {h['ref_data'][8:10]}/{h['ref_data'][5:7]}), R$ {h['vol']:.1f} mi"
-                                 + (" — só varejo" if h["varejo"] else "") + (f"; histórico: ANBIMA anda {pn['b'] * 100:.0f}% do gap no dia → {esp:+.0f} bps" if esp is not None else ""),
-                        "impacto_bps_pl": imp, "peso": x.perc_nav})
+                        "texto": c["txt"] + f" → ANBIMA de hoje esperada {ph['total']:+.0f} bps de % par ({ph['dtaxa']:+.1f} bps de taxa)",
+                        "impacto_bps_pl": ph["impacto_pl"], "peso": x.perc_nav})
     pl = P.get("acao_lidera")
     usa = pl and pl.get("lo") is not None and (pl["lo"] > 0 or pl["hi"] < 0) and (pl.get("oos") or {}).get("acerto") and pl["oos"]["acerto"] > 55
     for r, e in emis.items():
@@ -1413,7 +1490,8 @@ def uma_vez(arq):
         q, it = noticias(e["nome"])
         if it:
             news[e["raiz"]] = {"busca": q, "itens": it}
-    ctx = {"agenda": ag, "sinais": sinais(A, emis, prev, ipca, ag), "noticias": news, "juros": juros_b3(), "focus": focus()}
+    ctx = {"agenda": ag, "sinais": sinais(A, emis, prev, ipca, ag), "noticias": news, "juros": A.attrs.get("juros") or juros_b3(), "focus": focus(),
+           "estudo": ESTUDO, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref")}
     h = pagina(A, emis, prev, R, idx_c, mkt, td_, vr, ctx)
     (SAIDA / "vol_monitor.html").write_text(h, encoding="utf-8")
     log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB")
@@ -1500,8 +1578,15 @@ function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio
    <div class="k"><span>Duration média</span><b>${br(R.duration,2)}</b><i>+100 bps na taxa: ${br(R.dv01,2)}% do PL</i></div>
    <div class="k"><span>PnL 12m: carrego</span><b>${br(pnl("pnl_car")/100,2)}%</b><i>do PL, ativos com série oficial</i></div>
    <div class="k"><span>PnL 12m: taxa indicativa</span><b>${sg(pnl("pnl_mtm")/100,2,"%")}</b><i>resíduo ${br(pnl("pnl_res")/100,2)}%</i></div></div>
+  <section><h2>Previsão da marcação ANBIMA de hoje</h2><div id="ph"></div></section>
   <section><h2>O que olhar agora</h2><div id="sin"></div><p class="nota">Ordenado pelo impacto estimado em bps do PL e pelo peso. Impacto só aparece quando o sinal é estatisticamente útil (aba "O que antecipa").</p></section>
   <div class="g2"><section><h2>Mercado de crédito hoje</h2><div id="r_idx"></div></section><section><h2>Ativos que mais andaram em 1 mês (taxa indicativa)</h2><div id="r_mov"></div></section></div>`;
+  const PH=A.filter(a=>a.prev_hoje).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,...a.prev_hoje,txt:Object.entries(a.prev_hoje.comp).map(([k,c])=>`${k}: ${sg(c.bps,1)} (${esc(c.txt)})`).join("<br>")}));
+  const tot=PH.reduce((s,p)=>s+p.impacto_pl,0);
+  $("#ph").innerHTML=`<p>Esperado para o fundo: <b>${sg(tot,2," bps do PL")}</b> na marcação de hoje (ANBIMA de ${dt(D.data_ref)} → hoje), ${PH.length} ativos com sinal.${D.mercado_hoje&&Object.keys(D.mercado_hoje).length?" Tom do mercado: "+Object.entries(D.mercado_hoje).map(([k,v])=>`${k} ${sg(v,0," bps")}`).join(", "):""}</p><div id="ph_t"></div>
+   <p class="nota">bps de % do PU par (positivo = PU sobe). Δ taxa ≈ −% par / duration modificada. Regras do estudo intradiário (aba "O que antecipa"): negócio do papel conta pelo volume (≥ R$ 20 mi: a ANBIMA anda 39% do gap, acerto 82%); papel IPCA anda com o DAP; ação ≥ 2% no dia.</p>`;
+  PH.length?tabela($("#ph_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["total","% par (bps)","",v=>sg(v,1)],["dtaxa","Δ taxa (bps)","",v=>sgi(v,1)],["impacto_pl","Impacto (bps PL)","",v=>sg(v,2)],["perc","% PL","",v=>br(v,2)],["txt","Por quê","l wrap",v=>v]],
+    PH.sort((a,b)=>Math.abs(b.impacto_pl)-Math.abs(a.impacto_pl)),{h:380}):$("#ph_t").innerHTML='<p class="vazio">Sem negócios relevantes, juros ou ações fora do normal até agora.</p>';
   const S=D.sinais.map(s=>({...s,imp:s.impacto_bps_pl}));
   const cls=t=>/Fato|Recupera|Dado/.test(t)?"t-crit":/Negócio|Ação/.test(t)?"t-warn":"t-ok";
   S.length?tabela($("#sin"),[["tipo","Tipo","l",v=>`<span class="tag ${cls(v)}">${esc(v)}</span>`],["ativo","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,32))],["quando","Quando","l",v=>/\d{4}-/.test(v)?dt(v):esc(v)],
@@ -1576,11 +1661,14 @@ function detalhe(a){SEL=a;const e=E[a.raiz]||{},h=a.hist||{d:[]};const ac=e.acao
 function prev(){const P=D.prev;$("#p_prev").innerHTML=`<section><h2>O que historicamente antecipa o preço (todos os emissores da carteira juntos)</h2><div id="pv_t"></div>
   <p class="nota">r = correlação com intervalo de 95%. Útil = intervalo não cruza zero E acerto do sinal fora da amostra (último terço do tempo, inclinação estimada só com o passado) acima de 55% e acima da taxa-base.
   Sem isso o sinal é mostrado, mas não entra no impacto da aba "Hoje".</p></section>
+  <section><h2>Sinais intradiários: o que move a ANBIMA do dia (estudo amplo)</h2><div id="pv_es"></div><p class="nota" id="pv_esn"></p></section>
   <div class="g2"><section><h2>Valor relativo: spread × alavancagem e duration (DI+)</h2><div id="pv_vr" class="pl"></div><div id="pv_vrt"></div></section>
   <section><h2>Por emissor: a ação antecipa a taxa?</h2><div id="pv_em"></div></section></div>`;
   const util=p=>p.lo!=null&&(p.lo>0||p.hi<0)&&p.oos&&p.oos.acerto!=null&&p.oos.acerto>55&&p.oos.acerto>p.oos.base;
   tabela($("#pv_t"),[["sinal","Sinal","l wrap"],["n","n",""],["r","r","",v=>br(v,2)],["lo","IC 95%","",(v,p)=>p.lo==null?"—":`${br(p.lo,2)} a ${br(p.hi,2)}`],["b","Efeito","",(v,p)=>v==null?(p.z_medio!=null?`|z| ${br(p.z_medio,2)}`:"—"):`${br(v,2)} <span class="mut">${esc(p.unid)}</span>`],
     ["oos","Acerto fora da amostra","",v=>v&&v.acerto!=null?`${br(v.acerto,0)}% <span class="mut">(base ${br(v.base,0)}%, n=${v.n_teste})</span>`:"—"],["id","Útil?","",(v,p)=>p.r==null?(p.z_medio>1.2?'<span class="tag t-warn">move mais que o normal</span>':'<span class="tag">não</span>'):util(p)?'<span class="tag t-ok">sim</span>':'<span class="tag">não</span>']],P);
+  const Es=D.estudo;if(Es){tabela($("#pv_es"),[["0","Sinal","l wrap"],["1","Quando a ANBIMA anda","l"],["2","Tamanho","l"],["3","Acerto fora da amostra","",v=>br(v,0)+"%"],["4","Taxa-base","",v=>br(v,0)+"%"]],Es.linhas.map(l=>({...l})));
+    $("#pv_esn").textContent=`${Es.papeis} debêntures/CRI/CRA mais negociadas, negócios B3 ${Es.periodo} (${Es.dias_b3} pregões). Alvo: % do PU par da ANBIMA (PU indicativo / PU par). Acerto = sinal certo no último terço do tempo, com a inclinação estimada só com o passado. Momento da ANBIMA, gap de ontem, resultado trimestral e fato relevante não mostraram poder.`}
   const V=D.valor_rel;if(V){plot("pv_vr",[{x:V.pontos.map(p=>p.alav),y:V.pontos.map(p=>p.taxa),text:V.pontos.map(p=>p.cod),mode:"markers+text",textposition:"top center",textfont:{size:9},marker:{size:8,color:V.pontos.map(p=>p.res),colorscale:[[0,css("--s1")],[.5,css("--s4")],[1,css("--s2")]],showscale:false}}],
     {showlegend:false,xaxis:{title:{text:"dívida líquida / EBITDA (x)"}},yaxis:{title:{text:"spread CDI+ (%)"},gridcolor:css("--line")}});
     tabela($("#pv_vrt"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["alav","DL/EBITDA","",v=>br(v,2)],["dur","Duration","",v=>br(v,2)],["taxa","Spread","",v=>br(v,2)],["res","Paga a mais (bps)","",v=>sg(v,0)]],V.pontos,{ord:"res",h:260});

@@ -17,6 +17,30 @@ A página `saida/vol_monitor.html` tem sete abas:
 | **Risco** | retorno diário × VaR, contribuição para o risco, sensibilidade a fatores (IDA, JGP, IMA-B, IRF-M, Ibovespa, dólar, Tesouro) e matriz de correlação |
 | **Como é calculado** | as contas |
 
+## Previsão da marcação ANBIMA de hoje (aba Hoje)
+A previsão é recalculada a cada 15 minutos com os negócios do dia. Para cada ativo, estima quanto o % do PU par da ANBIMA de hoje vai andar, somando:
+- **Negócios do próprio papel na B3:** a ANBIMA anda uma fração do gap entre o negócio e a ANBIMA de ontem, conforme o volume do dia:
+
+  | Volume do papel no dia | Fração do gap | Acerto fora da amostra |
+  |---|---|---|
+  | > R$ 20 mi | 39% | 82% |
+  | R$ 5–20 mi | 30% | 73% |
+  | R$ 1–5 mi | 7% | 58% |
+  | varejo | — | ruído |
+
+- **Papéis IPCA:** o DAP ao vivo × duration. Sem DAP, o tom do mercado IPCA.
+- **Papel sem negócio:**
+  - outros papéis do mesmo emissor (6,5% do gap deles);
+  - na falta deles, o tom do mercado (10% do gap médio).
+- **Ação do emissor:** a partir de 2% no dia, 1,8 bps de % par por 1%.
+
+A calibração vem de um estudo com 447 debêntures, CRI e CRA e com os negócios B3 de 04/2023 a 10/2026. O teste é fora da amostra, no último terço do tempo. O resultado completo está na aba "O que antecipa". Não mostraram poder:
+- o momento da ANBIMA;
+- o gap de ontem não fechado;
+- o resultado trimestral;
+- o fato relevante;
+- a ação antecipando a semana seguinte.
+
 ## Rodar
 ```
 pip install pandas numpy requests pyarrow openpyxl lxml selenium
