@@ -41,6 +41,21 @@ A calibração vem de um estudo com 447 debêntures, CRI e CRA e com os negócio
 - o fato relevante;
 - a ação antecipando a semana seguinte.
 
+## Sinais de 1 a 20 dias úteis (aba Hoje)
+São regras testadas nas 100 debêntures mais líquidas (04/2023–10/2026). Todas ficaram estáveis em 2023-24 e em 2025-26. Cada uma mostra a mediana do movimento do % do PU par, a faixa 10–90% do que aconteceu e o acerto do sentido contra a taxa-base.
+
+| Situação | 5 dias | 10 dias | 20 dias |
+|---|---|---|---|
+| DI+: semana muito pior que o mercado (≤ −2 desvios) → continua caindo contra o mercado | −7 bps, 69% (base 53%) | −12, 69% | −18, 69% |
+| DI+: semana ≥ 50 bps melhor que o mercado → continua subindo contra o mercado | +14, 68% (47%) | +27, 70% | +43, 70% |
+| DI+: negócio ≥ R$ 20 mi ≥ 30 bps acima da ANBIMA → % par total sobe | +35, 80% (51%) | +50, 81% | +54, 86% |
+| Semana muito melhor com negócios acima da ANBIMA → % par total sobe | +12, 72% (54%) | +20, 71% | +27, 70% |
+| IPCA: queda extrema na semana (≤ −4 desvios) → repique (só 2025-26) | +28, 73% (50%) | +20, 69% | — |
+
+Motivo provável: a ANBIMA ajusta o spread de papéis DI+ em etapas, então a marcação tem inércia depois de um choque, e acompanha negócios grandes ao longo de vários dias.
+
+Não tiveram poder: os fundos (resgates × posições do CDA, compras e vendas, fluxo agregado dos fundos de crédito), as notícias e o momentum do índice.
+
 ## Próximos 5 dias úteis: faixa de 80% e direção (aba Hoje)
 O modelo é treinado uma vez por dia com todo o histórico ANBIMA em cache (~440 papéis). Dele saem duas peças:
 - **Centro:** quanto o papel deve andar contra o mercado (LightGBM).

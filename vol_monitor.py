@@ -90,6 +90,9 @@ ESTUDO5 = {"texto": "Teste fora da amostra (walk-forward mensal, 04/2024–10/20
                         ["% do par (abaixo do par)", "sobe (carrego)", -6.1], ["Negócios do mês acima da marcação", "ANBIMA sobe", 3.0],
                         ["Varejo da semana acima da marcação", "ANBIMA sobe", 2.8], ["Ação do emissor 5–20 dias", "mesmo sentido", 2.2],
                         ["Vol, volume, dias sem negócio, lado dos negócios", "nada", 0]]}
+# Regras de 1 a 20 dias úteis (estudo nas 100 debêntures mais líquidas, 04/2023–10/2026, estáveis em 2023-24 e 2025-26):
+# mediana, faixa 10–90% e acerto do sentido; 'contra o mercado' = papel − média do mesmo indexador
+REGRAS_DIAS = {"di_pior": {"nome": "DI+: semana muito pior que o mercado (≤ −2 desvios)", "sentido": -1, "alvo": "contra o mercado", "papeis": 30, "h": {"1": {"n": 2017, "mediana": -1.4, "p10": -13.5, "p90": 8.7, "acerto": 62.3, "base": 52.1, "acerto_2324": 59.3, "acerto_2526": 64.6}, "5": {"n": 1876, "mediana": -6.8, "p10": -38.6, "p90": 18.5, "acerto": 68.8, "base": 53.1, "acerto_2324": 65.2, "acerto_2526": 71.5}, "10": {"n": 1731, "mediana": -11.5, "p10": -62.8, "p90": 35.9, "acerto": 69.4, "base": 53.6, "acerto_2324": 66.7, "acerto_2526": 71.5}, "20": {"n": 1524, "mediana": -18.1, "p10": -81.4, "p90": 82.9, "acerto": 68.6, "base": 55.5, "acerto_2324": 67.4, "acerto_2526": 69.7}}}, "di_melhor": {"nome": "DI+: semana muito melhor que o mercado (≥ +50 bps)", "sentido": 1, "alvo": "contra o mercado", "papeis": 26, "h": {"1": {"n": 1037, "mediana": 3.1, "p10": -32.8, "p90": 42.6, "acerto": 58.7, "base": 47.9, "acerto_2324": 61.5, "acerto_2526": 56.7}, "5": {"n": 964, "mediana": 14.0, "p10": -46.4, "p90": 129.5, "acerto": 67.6, "base": 46.9, "acerto_2324": 70.4, "acerto_2526": 65.5}, "10": {"n": 904, "mediana": 26.8, "p10": -69.6, "p90": 197.5, "acerto": 70.1, "base": 46.4, "acerto_2324": 71.6, "acerto_2526": 69.0}, "20": {"n": 797, "mediana": 42.9, "p10": -117.0, "p90": 284.8, "acerto": 70.1, "base": 44.5, "acerto_2324": 72.8, "acerto_2526": 68.1}}}, "ipca_extremo": {"nome": "IPCA: queda extrema na semana (≤ −4 desvios) — repique", "sentido": 1, "alvo": "contra o mercado", "papeis": 28, "h": {"1": {"n": 187, "mediana": -6.7, "p10": -31.2, "p90": 27.1, "acerto": 36.4, "base": 49.6, "acerto_2324": None, "acerto_2526": 36.8}, "5": {"n": 176, "mediana": 28.5, "p10": -63.6, "p90": 96.2, "acerto": 72.7, "base": 50.3, "acerto_2324": None, "acerto_2526": 74.7}, "10": {"n": 115, "mediana": 19.9, "p10": -65.5, "p90": 152.7, "acerto": 68.7, "base": 49.8, "acerto_2324": None, "acerto_2526": 71.8}, "20": {"n": 83, "mediana": 48.2, "p10": -195.0, "p90": 254.2, "acerto": 62.7, "base": 50.4, "acerto_2324": None, "acerto_2526": 66.7}}}, "di_negocio": {"nome": "DI+: negócio ≥ R$ 20 mi ≥ 30 bps acima da ANBIMA", "sentido": 1, "alvo": "% par total", "papeis": 19, "h": {"1": {"n": 54, "mediana": 8.1, "p10": -8.2, "p90": 39.9, "acerto": 74.1, "base": 50.9, "acerto_2324": 71.4, "acerto_2526": 78.9}, "5": {"n": 54, "mediana": 34.6, "p10": -10.4, "p90": 126.9, "acerto": 79.6, "base": 50.8, "acerto_2324": 82.9, "acerto_2526": 73.7}, "10": {"n": 53, "mediana": 50.0, "p10": -6.1, "p90": 238.6, "acerto": 81.1, "base": 51.9, "acerto_2324": 85.7, "acerto_2526": 72.2}, "20": {"n": 49, "mediana": 54.2, "p10": -11.0, "p90": 329.1, "acerto": 85.7, "base": 52.8, "acerto_2324": 90.6, "acerto_2526": 76.5}}}, "semana_acima": {"nome": "Semana muito melhor com negócios acima da ANBIMA", "sentido": 1, "alvo": "% par total", "papeis": 55, "h": {"1": {"n": 280, "mediana": 2.3, "p10": -11.1, "p90": 30.7, "acerto": 60.7, "base": 52.1, "acerto_2324": 57.9, "acerto_2526": 62.7}, "5": {"n": 264, "mediana": 12.0, "p10": -22.9, "p90": 68.5, "acerto": 72.3, "base": 53.6, "acerto_2324": 73.5, "acerto_2526": 71.5}, "10": {"n": 249, "mediana": 20.4, "p10": -18.3, "p90": 101.6, "acerto": 70.7, "base": 54.8, "acerto_2324": 68.0, "acerto_2526": 72.6}, "20": {"n": 212, "mediana": 26.7, "p10": -29.2, "p90": 162.6, "acerto": 69.8, "base": 56.1, "acerto_2324": 70.3, "acerto_2526": 69.4}}}}
 ALERTAS = ["recuperação judicial", "recuperacao judicial", "default", "inadimpl", "rebaix", "downgrade", "vencimento antecipado",
            "rating", "aquisição", "fusão", "renegocia", "covenant", "waiver", "prejuízo", "reestrutura", "falência", "investigação",
            "assembleia", "multa", "rescis", "calote"]
@@ -803,8 +806,16 @@ def serie_oficial(h):
 
 
 def tipo_idx(indexador):
-    s = str(indexador or "").upper()
+    s = str(indexador or "").upper().strip()
+    if not s or s in ("NONE", "NAN", "SEM INDICE"):
+        return "?"
     return "%DI" if "%" in s and "DI" in s else "DI+" if "DI" in s else "IPCA" if "IPCA" in s else "IGPM" if "IGP" in s else "PRE"
+
+
+def indexadores(cods):
+    """Indexador de cada código: SND (debêntures, inclusive vencidas) e, na falta, o cadastro da B3."""
+    snd, cad = snd_caracteristicas(), cadastro_b3().drop_duplicates("cod").set_index("cod")
+    return {c: tipo_idx(snd.indice.get(c) if c in snd.index else cad.idx.get(c)) for c in cods}
 
 
 def taxa_e_pnl(v, of, venc, cupom, idx, dur0, cdi):
@@ -1206,7 +1217,8 @@ def calcula(arq):
     except Exception as e:
         log(f"previsão 5d: erro {type(e).__name__} {e}")
         p5, info5 = {}, {}
-    A["prev5"] = [p5.get(c) for c in A.codigo]
+    A["prev5"] = [p5.get(c) if p5.get(c, {}).get("mu") is not None else None for c in A.codigo]
+    A["regras_dias"] = [p5.get(c, {}).get("regras") for c in A.codigo]
     A.attrs["info5"] = info5
     log(f"previsão 5d: {len(p5)} ativos ({time.time() - t0:.0f}s)")
     A.attrs["juros"] = juros
@@ -1379,7 +1391,7 @@ def painel5(an_cods=None):
     S["maxabs20"] = r("absy", 20, "max", 12)
     S["nivel"] = S.lp
     cad = cadastro_b3().drop_duplicates("cod").set_index("cod")
-    S["idx"] = S.cod.map(cad.idx).fillna("").map(tipo_idx)
+    S["idx"] = S.cod.map(indexadores(list(S.cod.unique())))
     S["idx_c"] = S.idx.map({"DI+": 0, "IPCA": 1, "PRE": 2, "%DI": 3, "IGPM": 4}).fillna(5)
     mk = S.groupby(["idx", "data"]).y0.mean().rename("mk0").reset_index().sort_values("data")
     mk["mk5"] = mk.groupby("idx").mk0.transform(lambda x: x.rolling(5, min_periods=4).sum())
@@ -1472,6 +1484,17 @@ def modelo5(cods):
                       "sinal": "queda" if pct <= 10 else "alta" if pct >= 90 else None,
                       "porque": [{"f": NOME5.get(f, f), "bps": round(float(v), 1), "valor": None if not np.isfinite(getattr(row, f)) else round(float(getattr(row, f)), 2)} for f, v in top]}
     info["n_univ_hoje"] = int(len(U))
+    # regras de 1 a 20 dias: gatilhos no último dia de cada papel da carteira
+    for row in ult.itertuples():
+        z5 = row.rel5 / (row.vol60 * np.sqrt(5)) if row.vol60 and row.vol60 == row.vol60 else np.nan
+        own = row.gv / row.vol if row.vol else np.nan
+        g_ = {"di_pior": row.idx == "DI+" and z5 <= -2, "di_melhor": row.idx == "DI+" and row.rel5 >= 50,
+              "ipca_extremo": row.idx == "IPCA" and z5 <= -4, "di_negocio": row.idx == "DI+" and row.vol >= 20e6 and own >= 30,
+              "semana_acima": z5 >= 2.5 and row.press5 >= 10 and np.expm1(row.lvol5) >= 1}
+        ativ = [{"regra": k, "nome": REGRAS_DIAS[k]["nome"], "z5": None if z5 != z5 else round(float(z5), 1), "rel5": round(float(row.rel5), 1),
+                 "gap": None if own != own else round(float(own), 1)} for k, v in g_.items() if v is True or (isinstance(v, np.bool_) and v)]
+        if ativ:
+            out.setdefault(row.cod, {})["regras"] = ativ
     return out, info
 
 
@@ -1496,7 +1519,8 @@ def previsao_hoje(A, an, emis, juros):
     cad = cadastro_b3().drop_duplicates("cod").set_index("cod")
     emis_cod = cad.emissor.str.upper().str.strip()
     g["emissor"] = [emis_cod.get(c) for c in g.index]
-    g["idx"] = [tipo_idx(cad.idx.get(c)) for c in g.index]
+    ix = indexadores(list(g.index))
+    g["idx"] = [ix[c] for c in g.index]
     grande = g[g.vol >= 1e6]
     mkt = {i: float(x.gv.sum() / x.vol.sum()) for i, x in grande.groupby("idx") if x.vol.sum() >= 50e6}
     dap = {int(v["prazo"][:-1]): v["bps"] for v in (juros or {}).get("DAP", []) if v.get("bps") is not None}
@@ -1648,7 +1672,7 @@ def uma_vez(arq):
         if it:
             news[e["raiz"]] = {"busca": q, "itens": it}
     ctx = {"agenda": ag, "sinais": sinais(A, emis, prev, ipca, ag), "noticias": news, "juros": A.attrs.get("juros") or juros_b3(), "focus": focus(),
-           "estudo": ESTUDO, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref"), "info5": A.attrs.get("info5"), "estudo5": ESTUDO5}
+           "estudo": ESTUDO, "regras_dias": REGRAS_DIAS, "mercado_hoje": A.attrs.get("mercado_hoje"), "data_ref": A.attrs.get("data_ref"), "info5": A.attrs.get("info5"), "estudo5": ESTUDO5}
     h = pagina(A, emis, prev, R, idx_c, mkt, td_, vr, ctx)
     (SAIDA / "vol_monitor.html").write_text(h, encoding="utf-8")
     log(f"saida/vol_monitor.html {len(h) / 1e6:.1f} MB")
@@ -1736,6 +1760,7 @@ function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio
    <div class="k"><span>PnL 12m: carrego</span><b>${br(pnl("pnl_car")/100,2)}%</b><i>do PL, ativos com série oficial</i></div>
    <div class="k"><span>PnL 12m: taxa indicativa</span><b>${sg(pnl("pnl_mtm")/100,2,"%")}</b><i>resíduo ${br(pnl("pnl_res")/100,2)}%</i></div></div>
   <section><h2>Previsão da marcação ANBIMA de hoje</h2><div id="ph"></div></section>
+  <section><h2>Sinais de 1 a 20 dias úteis (regras testadas)</h2><div id="rd"></div></section>
   <section><h2>Próximos 5 dias úteis: onde o % do PU par deve estar</h2><div id="p5"></div></section>
   <section><h2>O que olhar agora</h2><div id="sin"></div><p class="nota">Ordenado pelo impacto estimado em bps do PL e pelo peso. Impacto só aparece quando o sinal é estatisticamente útil (aba "O que antecipa").</p></section>
   <div class="g2"><section><h2>Mercado de crédito hoje</h2><div id="r_idx"></div></section><section><h2>Ativos que mais andaram em 1 mês (taxa indicativa)</h2><div id="r_mov"></div></section></div>`;
@@ -1745,6 +1770,13 @@ function resumo(){const bt=R.backtest||{};const pP=D.prev.find(p=>p.id=="negocio
    <p class="nota">bps de % do PU par (positivo = PU sobe). Δ taxa ≈ −% par / duration modificada. Regras do estudo intradiário (aba "O que antecipa"): negócio do papel conta pelo volume (≥ R$ 20 mi: a ANBIMA anda 39% do gap, acerto 82%); papel IPCA anda com o DAP; ação ≥ 2% no dia.</p>`;
   PH.length?tabela($("#ph_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,26))],["total","% par (bps)","",v=>sg(v,1)],["dtaxa","Δ taxa (bps)","",v=>sgi(v,1)],["impacto_pl","Impacto (bps PL)","",v=>sg(v,2)],["perc","% PL","",v=>br(v,2)],["txt","Por quê","l wrap",v=>v]],
     PH.sort((a,b)=>Math.abs(b.impacto_pl)-Math.abs(a.impacto_pl)),{h:380}):$("#ph_t").innerHTML='<p class="vazio">Sem negócios relevantes, juros ou ações fora do normal até agora.</p>';
+  const RD=D.regras_dias||{},RA=A.filter(a=>a.regras_dias).flatMap(a=>a.regras_dias.map(r=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,...r,R:RD[r.regra]})));
+  const cel=(R,h)=>{const x=R.h[h];return x?`${sg(x.mediana,0)} <span class="mut">(${sg(x.p10,0)} a ${sg(x.p90,0)})</span><br><b>${br(x.acerto,0)}%</b> <span class="mut">vs ${br(x.base,0)}%</span>`:"—"};
+  $("#rd").innerHTML=`<p>Situações em que o histórico mostra o sentido do % do PU par com ~70–80% de acerto (base ~50%). Cada célula: mediana do movimento em bps (faixa 10–90% do que aconteceu) e acerto do sentido vs a base.</p><div id="rd_t"></div>
+   <p class="nota">Estudo nas 100 debêntures mais líquidas, 04/2023–10/2026, ${Object.keys(RD).length} regras estáveis em 2023-24 e em 2025-26. Por quê: a ANBIMA ajusta o spread de papéis DI+ em etapas (a marcação tem inércia depois de um choque) e acompanha negócios grandes ao longo de dias; em IPCA, quedas extremas da semana devolvem. Fundos (resgates × posições, CDA), notícias e o restante testado não tiveram poder.</p>`;
+  RA.length?tabela($("#rd_t"),[["cod","Ativo","l"],["emissor","Emissor","l",v=>esc((v||"").slice(0,22))],["nome","Situação","l wrap",(v,x)=>`${esc(v)}${x.gap!=null&&x.regra=="di_negocio"?` (gap ${sg(x.gap,0)})`:""} <span class="mut">${esc(x.R.alvo)}</span>`],
+    ["h1","1 dia","",(v,x)=>cel(x.R,1)],["h5","5 dias","",(v,x)=>cel(x.R,5)],["h10","10 dias","",(v,x)=>cel(x.R,10)],["h20","20 dias","",(v,x)=>cel(x.R,20)],
+    ["imp","Impacto 10d (bps PL)","",(v,x)=>x.R.h[10]?sg(x.R.h[10].mediana*x.perc/100,2):"—"],["perc","% PL","",v=>br(v,2)]],RA,{h:420}):$("#rd_t").innerHTML='<p class="vazio">Nenhum papel da carteira está numa dessas situações hoje.</p>';
   const P5=A.filter(a=>a.prev5).map(a=>({cod:a.codigo,emissor:a.emissor,perc:a.perc_nav,par:a.pct_par,...a.prev5,dur:a.duration,
      porq:a.prev5.porque.map(x=>`${esc(x.f)} ${sg(x.bps,1)}`).join(" · ")}));
   const I5=D.info5||{};
